@@ -1,4 +1,4 @@
-name: Build BenOBD v6 Multi-Tab Diagnostics APK
+name: Build BenOBD v7.1 Full Live Data APK
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Create BenOBD v6 Android project
+      - name: Create BenOBD v7.1 Android project
         shell: bash
         run: |
           mkdir -p app/src/main/java/ro/benobd/app
@@ -79,8 +79,8 @@ jobs:
                   applicationId "ro.benobd.app"
                   minSdk 26
                   targetSdk 35
-                  versionCode 9
-                  versionName "6.0.0"
+                  versionCode 11
+                  versionName "7.1.0"
               }
           }
           EOF
@@ -91,6 +91,7 @@ jobs:
               <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
               <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
 
               <application
@@ -171,14 +172,20 @@ jobs:
           import android.widget.TextView;
           import android.widget.Toast;
           
+          import java.io.BufferedReader;
+          import java.io.InputStreamReader;
           import java.io.InputStream;
           import java.io.OutputStream;
           import java.nio.charset.StandardCharsets;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
           import java.util.ArrayList;
           import java.util.Arrays;
           import java.util.Collections;
           import java.util.Comparator;
           import java.util.HashSet;
+          import java.util.HashMap;
+          import java.util.Map;
           import java.util.List;
           import java.util.Locale;
           import java.util.Set;
@@ -187,6 +194,8 @@ jobs:
           import java.util.concurrent.Executors;
           import java.util.regex.Matcher;
           import java.util.regex.Pattern;
+          import org.json.JSONArray;
+          import org.json.JSONObject;
           
           public class MainActivity extends Activity {
               private static final int BG = Color.rgb(8, 10, 12);
@@ -212,13 +221,25 @@ jobs:
           
               private LinearLayout root;
               private ScrollView diagnosticsTab;
+              private ScrollView fullLiveTab;
+              private ScrollView vehicleTab;
               private ScrollView activationsTab;
               private ScrollView logTab;
               private Button navDiagnostics;
+              private Button navLive;
+              private Button navVehicle;
               private Button navActivations;
               private Button navLog;
               private TextView activationAdapterStatus;
+              private TextView vehicleAdapterStatus;
+              private TextView vehicleVinStatus;
+              private TextView vehicleProfileBox;
+              private TextView moduleProfileBox;
               private String adapterKind = "UNKNOWN";
+              private String adapterDetails = "";
+              private String lastVin = "";
+              private final ArrayList<ModuleIdentity> moduleIdentities = new ArrayList<>();
+              private final Map<String, TextView> activationStatusViews = new HashMap<>();
               private TextView status;
               private TextView vehicleInfo;
               private TextView dtcBox;
@@ -228,7 +249,12 @@ jobs:
               private TextView deepTimer;
               private Button connectButton;
               private Button liveButton;
+              private Button allLiveButton;
               private Button dtcButton;
+              private TextView allLiveStatus;
+              private TextView allLiveBox;
+              private boolean allLiveRunning = false;
+              private final ArrayList<Integer> supportedMode01Pids = new ArrayList<>();
               private Button deepButton;
               private Button clearButton;
           
@@ -275,6 +301,136 @@ jobs:
                   }
               };
           
+              private final Runnable fullLiveTick = new Runnable() {
+                  @Override public void run() {
+                      if (!allLiveRunning || !isConnected()) return;
+
+                      io.execute(() -> {
+                          long cycleStart = SystemClock.elapsedRealtime();
+                          try {
+                              if (supportedMode01Pids.isEmpty()) {
+                                  main.post(() -> {
+                                      if (allLiveStatus != null) {
+                                          allLiveStatus.setText(t(
+                                                  "Detectez toate PID-urile suportate...",
+                                                  "Detecting all supported PIDs..."));
+                                      }
+                                  });
+                                  ArrayList<Integer> found = querySupportedMode01Pids();
+                                  synchronized (supportedMode01Pids) {
+                                      supportedMode01Pids.clear();
+                                      supportedMode01Pids.addAll(found);
+                                  }
+                              }
+
+                              ArrayList<Integer> sweep;
+                              synchronized (supportedMode01Pids) {
+                                  sweep = new ArrayList<>(supportedMode01Pids);
+                              }
+
+                              StringBuilder sb = new StringBuilder();
+                              sb.append(t("LIVE TOTAL OBD-II\n", "FULL OBD-II LIVE DATA\n"));
+                              sb.append(t("PID suportate: ", "Supported PIDs: "))
+                                      .append(sweep.size()).append("\n\n");
+
+                              int ok = 0;
+                              int pos = 0;
+
+                              for (Integer pidInt : sweep) {
+                                  if (!allLiveRunning) break;
+                                  if (pidInt == null) continue;
+                                  int pidValue = pidInt;
+
+                                  // Bitmap capability PIDs are not sensor values.
+                                  if (pidValue == 0x00 || pidValue == 0x20
+                                          || pidValue == 0x40 || pidValue == 0x60
+                                          || pidValue == 0x80 || pidValue == 0xA0
+                                          || pidValue == 0xC0 || pidValue == 0xE0) {
+                                      continue;
+                                  }
+
+                                  final int current = ++pos;
+                                  final String stage = String.format(
+                                          Locale.US, "PID 01%02X • %d/%d",
+                                          pidValue, current, sweep.size());
+                                  main.post(() -> {
+                                      if (allLiveStatus != null) {
+                                          long ms = SystemClock.elapsedRealtime()
+                                                  - cycleStart;
+                                          allLiveStatus.setText(
+                                                  t("LIVE TOTAL • ", "FULL LIVE • ")
+                                                          + stage + " • "
+                                                          + formatDuration(ms));
+                                      }
+                                  });
+
+                                  String cmd = String.format(
+                                          Locale.US, "01%02X", pidValue);
+                                  String raw = elm(cmd, 900);
+
+                                  if (!isUseful(raw)) continue;
+
+                                  ok++;
+                                  String decoded = decodeAnyMode01Pid(
+                                          pidValue, raw);
+                                  sb.append("01")
+                                          .append(String.format(
+                                                  Locale.US, "%02X", pidValue))
+                                          .append("  ")
+                                          .append(pidName(pidValue))
+                                          .append("\n  ")
+                                          .append(decoded)
+                                          .append("\n\n");
+                              }
+
+                              long cycleMs = SystemClock.elapsedRealtime()
+                                      - cycleStart;
+                              sb.append(t("Valori citite: ", "Values read: "))
+                                      .append(ok)
+                                      .append("\n")
+                                      .append(t("Durata ciclu: ", "Cycle time: "))
+                                      .append(formatDuration(cycleMs))
+                                      .append("\n")
+                                      .append(t(
+                                              "Necunoscutele sunt pastrate RAW; BenOBD nu inventeaza formule pentru PID-uri neclare.",
+                                              "Unknown values are preserved as RAW; BenOBD never invents formulas for unclear PIDs."));
+
+                              final String report = sb.toString();
+                              appendLog("FULL LIVE CYCLE\n" + report);
+
+                              main.post(() -> {
+                                  if (allLiveBox != null) {
+                                      allLiveBox.setText(report);
+                                  }
+                                  if (allLiveStatus != null) {
+                                      allLiveStatus.setText(
+                                              t("LIVE TOTAL • ciclu ",
+                                                      "FULL LIVE • cycle ")
+                                                      + formatDuration(cycleMs)
+                                                      + " • "
+                                                      + ok
+                                                      + t(" valori", " values"));
+                                  }
+                              });
+                          } catch (Exception e) {
+                              appendLog("FULL LIVE ERROR: "
+                                      + e.getMessage());
+                              main.post(() -> {
+                                  if (allLiveStatus != null) {
+                                      allLiveStatus.setText(
+                                              "FULL LIVE ERROR: "
+                                                      + e.getMessage());
+                                  }
+                              });
+                          } finally {
+                              if (allLiveRunning) {
+                                  main.postDelayed(fullLiveTick, 250);
+                              }
+                          }
+                      });
+                  }
+              };
+
               private final Runnable liveTick = new Runnable() {
                   @Override public void run() {
                       if (!liveRunning || !isConnected()) return;
@@ -331,11 +487,13 @@ jobs:
               @Override
               protected void onCreate(Bundle state) {
                   super.onCreate(state);
+                  getWindow().setStatusBarColor(BG);
+                  getWindow().setNavigationBarColor(BG);
                   prefs = getSharedPreferences("benobd", MODE_PRIVATE);
                   english = prefs.getBoolean("english", false);
                   if (!prefs.contains("tech_log")) {
                       prefs.edit().putString("tech_log",
-                              t("BenOBD v6 pornit.", "BenOBD v6 started.")).apply();
+                              t("BenOBD v7.1 pornit.", "BenOBD v7.1 started.")).apply();
                   }
                   adapter = BluetoothAdapter.getDefaultAdapter();
                   requestBtPermission();
@@ -354,8 +512,29 @@ jobs:
                   diagnosticsTab.setBackgroundColor(BG);
                   LinearLayout diagnosticsRoot = new LinearLayout(this);
                   diagnosticsRoot.setOrientation(LinearLayout.VERTICAL);
-                  diagnosticsRoot.setPadding(dp(16), dp(12), dp(16), dp(34));
+                  diagnosticsRoot.setPadding(dp(16), dp(30), dp(16), dp(34));
                   diagnosticsTab.addView(diagnosticsRoot, new ScrollView.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  fullLiveTab = new ScrollView(this);
+                  fullLiveTab.setFillViewport(true);
+                  fullLiveTab.setBackgroundColor(BG);
+                  LinearLayout fullLiveRoot = new LinearLayout(this);
+                  fullLiveRoot.setOrientation(LinearLayout.VERTICAL);
+                  fullLiveRoot.setPadding(dp(16), dp(30), dp(16), dp(34));
+                  fullLiveTab.addView(fullLiveRoot,
+                          new ScrollView.LayoutParams(
+                                  ViewGroup.LayoutParams.MATCH_PARENT,
+                                  ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  vehicleTab = new ScrollView(this);
+                  vehicleTab.setFillViewport(true);
+                  vehicleTab.setBackgroundColor(BG);
+                  LinearLayout vehicleRoot = new LinearLayout(this);
+                  vehicleRoot.setOrientation(LinearLayout.VERTICAL);
+                  vehicleRoot.setPadding(dp(16), dp(30), dp(16), dp(34));
+                  vehicleTab.addView(vehicleRoot, new ScrollView.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -364,7 +543,7 @@ jobs:
                   activationsTab.setBackgroundColor(BG);
                   LinearLayout activationsRoot = new LinearLayout(this);
                   activationsRoot.setOrientation(LinearLayout.VERTICAL);
-                  activationsRoot.setPadding(dp(16), dp(12), dp(16), dp(34));
+                  activationsRoot.setPadding(dp(16), dp(30), dp(16), dp(34));
                   activationsTab.addView(activationsRoot, new ScrollView.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -374,12 +553,18 @@ jobs:
                   logTab.setBackgroundColor(BG);
                   LinearLayout logRoot = new LinearLayout(this);
                   logRoot.setOrientation(LinearLayout.VERTICAL);
-                  logRoot.setPadding(dp(16), dp(12), dp(16), dp(34));
+                  logRoot.setPadding(dp(16), dp(30), dp(16), dp(34));
                   logTab.addView(logRoot, new ScrollView.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.WRAP_CONTENT));
 
                   content.addView(diagnosticsTab, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT));
+                  content.addView(fullLiveTab, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT));
+                  content.addView(vehicleTab, new FrameLayout.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.MATCH_PARENT));
                   content.addView(activationsTab, new FrameLayout.LayoutParams(
@@ -405,7 +590,7 @@ jobs:
                   headText.addView(label("BenOBD", 29, TEXT, true));
                   headText.addView(label(t("Mercedes W204 Deep Diagnostics", "Mercedes W204 Deep Diagnostics"),
                           14, MUTED, false));
-                  headText.addView(label("v6.0 • Deep Diagnostics + Coding Hub", 11, GREEN, false));
+                  headText.addView(label("v7.1 • Full Live Data + Smart Profiles", 11, GREEN, false));
                   header.addView(headText, new LinearLayout.LayoutParams(
                           0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                   root.addView(header, section());
@@ -599,6 +784,186 @@ jobs:
 
                   addDonationCard();
 
+                  root = fullLiveRoot;
+
+                  LinearLayout liveHeader = cardHorizontal();
+                  ImageView liveLogo = new ImageView(this);
+                  liveLogo.setImageResource(
+                          ro.benobd.app.R.drawable.w204_icon);
+                  liveLogo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  liveHeader.addView(liveLogo,
+                          new LinearLayout.LayoutParams(dp(76), dp(76)));
+
+                  LinearLayout liveHeadText = new LinearLayout(this);
+                  liveHeadText.setOrientation(LinearLayout.VERTICAL);
+                  liveHeadText.setPadding(dp(12), 0, 0, 0);
+                  liveHeadText.addView(label(
+                          t("Live Data TOTAL", "FULL Live Data"),
+                          24, TEXT, true));
+                  liveHeadText.addView(label(t(
+                          "Citeste automat fiecare PID OBD-II raportat de ECU ca suportat.",
+                          "Automatically reads every OBD-II PID reported by the ECU as supported."),
+                          12, MUTED, false));
+                  liveHeader.addView(liveHeadText,
+                          new LinearLayout.LayoutParams(
+                                  0,
+                                  ViewGroup.LayoutParams.WRAP_CONTENT,
+                                  1));
+                  root.addView(liveHeader, section());
+
+                  TextView liveNotice = label(t(
+                          "BenOBD interogheaza toate PID-urile Mode 01 suportate. Valorile cunoscute sunt decodate; orice PID pe care nu il putem interpreta sigur este afisat RAW. Parametrii Mercedes proprietari se citesc separat numai cand exista un profil de modul validat.",
+                          "BenOBD queries every supported Mode 01 PID. Known values are decoded; any PID that cannot be interpreted safely is shown RAW. Proprietary Mercedes parameters are read separately only when a validated module profile exists."),
+                          12, MUTED, false);
+                  liveNotice.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  liveNotice.setBackground(roundRect(
+                          CARD, Color.rgb(43, 48, 53), 1, 14));
+                  root.addView(liveNotice, section());
+
+                  allLiveStatus = statusPill(
+                          t("LIVE TOTAL pregatit", "FULL LIVE ready"));
+                  root.addView(allLiveStatus, section());
+
+                  Button detectAll = secondaryButton(t(
+                          "Detecteaza toate PID-urile suportate",
+                          "Detect all supported PIDs"));
+                  detectAll.setOnClickListener(v ->
+                          detectSupportedPidsForFullLive());
+                  root.addView(detectAll, smallGap());
+
+                  allLiveButton = button(t(
+                          "Porneste LIVE TOTAL",
+                          "Start FULL LIVE"));
+                  allLiveButton.setOnClickListener(v ->
+                          toggleFullLive());
+                  root.addView(allLiveButton, smallGap());
+
+                  Button coreLive = secondaryButton(t(
+                          "Porneste/opreste Live Rapid",
+                          "Start/stop Fast Live"));
+                  coreLive.setOnClickListener(v -> toggleLive());
+                  root.addView(coreLive, smallGap());
+
+                  Button rawCanLive = secondaryButton(t(
+                          "Monitor CAN RAW 5 secunde",
+                          "RAW CAN monitor 5 seconds"));
+                  rawCanLive.setOnClickListener(v ->
+                          passiveCanMonitor());
+                  root.addView(rawCanLive, smallGap());
+
+                  allLiveBox = monoBox(t(
+                          "Conecteaza adaptorul, detecteaza PID-urile si porneste LIVE TOTAL.",
+                          "Connect the adapter, detect PIDs and start FULL LIVE."));
+                  root.addView(allLiveBox, section());
+
+                  Button copyLive = secondaryButton(t(
+                          "Copiaza snapshot LIVE",
+                          "Copy LIVE snapshot"));
+                  copyLive.setOnClickListener(v -> {
+                      ClipboardManager cm = (ClipboardManager)
+                              getSystemService(Context.CLIPBOARD_SERVICE);
+                      cm.setPrimaryClip(ClipData.newPlainText(
+                              "BenOBD full live",
+                              allLiveBox.getText()));
+                      toast(t("Snapshot copiat.",
+                              "Snapshot copied."));
+                  });
+                  root.addView(copyLive, smallGap());
+
+                  TextView liveLimits = label(t(
+                          "Viteza de actualizare depinde de ECU si adaptor. ELM327 poate avea un ciclu de mai multe secunde cand sunt multe PID-uri. OBDLink/STN poate fi semnificativ mai rapid. Nu toate valorile exista pe fiecare masina.",
+                          "Refresh speed depends on ECU and adapter. ELM327 can take several seconds per cycle when many PIDs are exposed. OBDLink/STN can be significantly faster. Not every value exists on every vehicle."),
+                          11, GREEN, false);
+                  liveLimits.setPadding(dp(10), dp(10), dp(10), dp(10));
+                  root.addView(liveLimits, section());
+
+                  root = vehicleRoot;
+
+                  LinearLayout vehicleHeader = cardHorizontal();
+                  ImageView vehicleLogo = new ImageView(this);
+                  vehicleLogo.setImageResource(ro.benobd.app.R.drawable.w204_icon);
+                  vehicleLogo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  vehicleHeader.addView(vehicleLogo,
+                          new LinearLayout.LayoutParams(dp(82), dp(82)));
+
+                  LinearLayout vehicleHeadText = new LinearLayout(this);
+                  vehicleHeadText.setOrientation(LinearLayout.VERTICAL);
+                  vehicleHeadText.setPadding(dp(12), 0, 0, 0);
+                  vehicleHeadText.addView(label(
+                          t("Profil Vehicul", "Vehicle Profile"), 24, TEXT, true));
+                  vehicleHeadText.addView(label(t(
+                          "VIN, motorizare, trim, dotari si module detectate.",
+                          "VIN, engine, trim, equipment and detected modules."),
+                          13, MUTED, false));
+                  vehicleHeader.addView(vehicleHeadText,
+                          new LinearLayout.LayoutParams(
+                                  0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                  root.addView(vehicleHeader, section());
+
+                  vehicleAdapterStatus = statusPill(
+                          t("Adaptor: neconectat", "Adapter: disconnected"));
+                  root.addView(vehicleAdapterStatus, section());
+
+                  vehicleVinStatus = statusPill(
+                          t("VIN: asteapta identificarea ECU",
+                                  "VIN: waiting for ECU identification"));
+                  root.addView(vehicleVinStatus, smallGap());
+
+                  Button smartIdentify = button(t(
+                          "Identifica automat adaptor + VIN + ECU",
+                          "Auto identify adapter + VIN + ECU"));
+                  smartIdentify.setOnClickListener(v -> readVehicleInfo());
+                  root.addView(smartIdentify, section());
+
+                  Button decodeVin = secondaryButton(t(
+                          "Decodeaza VIN: trim, motor si dotari",
+                          "Decode VIN: trim, engine and equipment"));
+                  decodeVin.setOnClickListener(v -> {
+                      String vin = lastVin;
+                      if (vin == null || vin.length() != 17) {
+                          vin = prefs.getString("last_vin", "");
+                      }
+                      if (vin.length() == 17) {
+                          decodeVinOnline(vin);
+                      } else {
+                          dialog(t("VIN indisponibil", "VIN unavailable"),
+                                  t("Conecteaza masina si ruleaza identificarea VIN.",
+                                          "Connect the vehicle and run VIN identification."));
+                      }
+                  });
+                  root.addView(decodeVin, smallGap());
+
+                  vehicleProfileBox = monoBox(prefs.getString(
+                          "vehicle_profile",
+                          t("Profilul VIN va aparea aici.",
+                                  "The VIN profile will appear here.")));
+                  root.addView(vehicleProfileBox, section());
+
+                  sectionTitle(t("Module Mercedes si profile",
+                          "Mercedes modules and profiles"));
+
+                  Button profileDiscovery = secondaryButton(t(
+                          "Deep Scan + potrivire automata profile",
+                          "Deep Scan + automatic profile matching"));
+                  profileDiscovery.setOnClickListener(v -> deepUdsScan());
+                  root.addView(profileDiscovery, smallGap());
+
+                  moduleProfileBox = monoBox(t(
+                          "Dupa Deep Scan, BenOBD afiseaza identificatorii reali cititi din ECU si incearca sa potriveasca familia IC_204 / SAMF_204 / CGW_204. Scrierea ramane blocata daca nu exista o reteta exacta validata pentru software-ul detectat.",
+                          "After Deep Scan, BenOBD shows the real identifiers read from ECUs and attempts to match IC_204 / SAMF_204 / CGW_204 families. Writing stays locked unless an exact validated recipe exists for the detected software."));
+                  root.addView(moduleProfileBox, section());
+
+                  TextView vinSourceNote = label(t(
+                          "Date VIN: NHTSA vPIC + informatii citite din ECU. Pentru masinile europene, baza publica poate fi incompleta. Codurile Mercedes SA/Data Card nu sunt inventate daca nu sunt disponibile.",
+                          "VIN data: NHTSA vPIC + information read from the ECU. For European vehicles the public database may be incomplete. Mercedes SA/Data Card codes are never invented when unavailable."),
+                          11, MUTED, false);
+                  vinSourceNote.setPadding(dp(10), dp(10), dp(10), dp(10));
+                  vinSourceNote.setBackground(roundRect(
+                          CARD, Color.rgb(43, 48, 53), 1, 14));
+                  root.addView(vinSourceNote, section());
+
+                  addDonationCard();
+
                   root = activationsRoot;
 
                   LinearLayout actHeader = cardHorizontal();
@@ -693,7 +1058,7 @@ jobs:
                                   "Enabled only when the module profile is recognized."));
 
                   TextView safe = label(t(
-                          "BenOBD v6 nu trimite payload-uri de coding ghicite. ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor si TCU raman Read-Only pana exista profil validat si procedura de recovery.",
+                          "BenOBD v7 nu trimite payload-uri de coding ghicite. ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor si TCU raman Read-Only pana exista profil validat si procedura de recovery.",
                           "BenOBD v6 never sends guessed coding payloads. ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU and TCU remain Read-Only until a validated profile and recovery procedure exist."),
                           12, GREEN, false);
                   safe.setPadding(dp(10), dp(10), dp(10), dp(10));
@@ -712,7 +1077,7 @@ jobs:
                   root.addView(logInfo, smallGap());
 
                   log = monoBox(prefs.getString("tech_log",
-                          t("BenOBD v6 pornit.", "BenOBD v6 started.")));
+                          t("BenOBD v7.1 pornit.", "BenOBD v7.1 started.")));
                   root.addView(log, section());
 
                   Button refreshLog = secondaryButton(
@@ -752,15 +1117,21 @@ jobs:
                   nav.setPadding(dp(8), dp(6), dp(8), dp(8));
                   nav.setBackgroundColor(CARD);
 
-                  navDiagnostics = navButton(t("DIAGNOZA", "DIAGNOSTICS"));
-                  navActivations = navButton(t("ACTIVARI", "ACTIVATIONS"));
+                  navDiagnostics = navButton(t("DIAG", "DIAG"));
+                  navLive = navButton("LIVE");
+                  navVehicle = navButton(t("AUTO", "VEHICLE"));
+                  navActivations = navButton(t("CODARI", "CODING"));
                   navLog = navButton(t("JURNAL", "LOG"));
 
                   navDiagnostics.setOnClickListener(v -> showTab("diag"));
+                  navLive.setOnClickListener(v -> showTab("live"));
+                  navVehicle.setOnClickListener(v -> showTab("vehicle"));
                   navActivations.setOnClickListener(v -> showTab("act"));
                   navLog.setOnClickListener(v -> showTab("log"));
 
                   nav.addView(navDiagnostics, new LinearLayout.LayoutParams(0, dp(52), 1));
+                  nav.addView(navLive, new LinearLayout.LayoutParams(0, dp(52), 1));
+                  nav.addView(navVehicle, new LinearLayout.LayoutParams(0, dp(52), 1));
                   nav.addView(navActivations, new LinearLayout.LayoutParams(0, dp(52), 1));
                   nav.addView(navLog, new LinearLayout.LayoutParams(0, dp(52), 1));
                   shell.addView(nav);
@@ -771,22 +1142,32 @@ jobs:
 
               private void showTab(String tab) {
                   boolean diag = "diag".equals(tab);
+                  boolean live = "live".equals(tab);
+                  boolean vehicle = "vehicle".equals(tab);
                   boolean act = "act".equals(tab);
                   boolean lg = "log".equals(tab);
 
                   diagnosticsTab.setVisibility(diag ? View.VISIBLE : View.GONE);
+                  fullLiveTab.setVisibility(live ? View.VISIBLE : View.GONE);
+                  vehicleTab.setVisibility(vehicle ? View.VISIBLE : View.GONE);
                   activationsTab.setVisibility(act ? View.VISIBLE : View.GONE);
                   logTab.setVisibility(lg ? View.VISIBLE : View.GONE);
 
                   styleNavButton(navDiagnostics, diag);
+                  styleNavButton(navLive, live);
+                  styleNavButton(navVehicle, vehicle);
                   styleNavButton(navActivations, act);
                   styleNavButton(navLog, lg);
 
                   if (lg && log != null) {
                       log.setText(prefs.getString("tech_log", ""));
                   }
+                  if (vehicle) {
+                      updateVehicleTabStatus();
+                  }
                   if (act) {
                       updateActivationAdapterStatus();
+                      refreshActivationProfileBadges();
                   }
               }
 
@@ -794,7 +1175,7 @@ jobs:
                   Button b = new Button(this);
                   b.setText(text);
                   b.setAllCaps(false);
-                  b.setTextSize(12);
+                  b.setTextSize(11);
                   b.setTypeface(Typeface.create("sans-serif-light", Typeface.BOLD));
                   return b;
               }
@@ -824,11 +1205,11 @@ jobs:
                   payRow.setOrientation(LinearLayout.HORIZONTAL);
                   payRow.setPadding(0, dp(8), 0, 0);
 
-                  Button revolut = secondaryButton("REVOLUT  @beniamin24");
+                  Button revolut = secondaryButton("REVOLUT  •  1,10 EUR");
                   revolut.setOnClickListener(v ->
                           openExternal("https://revolut.me/beniamin24"));
 
-                  Button paypal = secondaryButton("PAYPAL  @YaminBene");
+                  Button paypal = secondaryButton("PAYPAL  •  1,10 EUR");
                   paypal.setOnClickListener(v ->
                           openExternal("https://paypal.me/YaminBene/1.10EUR"));
 
@@ -851,34 +1232,374 @@ jobs:
                   }
               }
 
-              private void updateActivationAdapterStatus() {
-                  if (activationAdapterStatus == null) return;
-                  String text = t("Interfata curenta: ", "Current interface: ") + adapterKind;
-                  if ("ELM327".equals(adapterKind)) {
-                      text += t(" • diagnoza OK, coding avansat nerecomandat",
-                              " • diagnostics OK, advanced coding not recommended");
-                  } else if (adapterKind.contains("OBDLINK") || adapterKind.contains("STN")) {
-                      text += t(" • potrivita pentru raw CAN/UDS si profile validate",
-                              " • suitable for raw CAN/UDS and validated profiles");
+              private static class ModuleIdentity {
+                  final String tx;
+                  final String rx;
+                  final String raw;
+                  final String ascii;
+                  final String family;
+
+                  ModuleIdentity(String tx, String rx, String raw,
+                                 String ascii, String family) {
+                      this.tx = tx;
+                      this.rx = rx;
+                      this.raw = raw;
+                      this.ascii = ascii;
+                      this.family = family;
                   }
-                  activationAdapterStatus.setText(text);
               }
 
-              private String detectAdapterKind(String ati) {
-                  String x = clean(ati).toUpperCase(Locale.ROOT);
-                  String name = selectedDevice == null ? "" :
-                          safeName(selectedDevice).toUpperCase(Locale.ROOT);
-                  if (x.contains("OBDLINK") || name.contains("OBDLINK")) {
-                      return "OBDLINK / STN";
+              private void registerDetectedModule(
+                      String tx, String rx, String rawIdentity) {
+                  String ascii = printableAsciiFromHex(rawIdentity);
+                  String family = classifyMercedesModuleFamily(
+                          rawIdentity + " " + ascii);
+                  moduleIdentities.add(new ModuleIdentity(
+                          tx, rx, rawIdentity, ascii, family));
+              }
+
+              private String printableAsciiFromHex(String raw) {
+                  int[] b = hexBytes(raw);
+                  StringBuilder sb = new StringBuilder();
+                  for (int v : b) {
+                      if (v >= 0x20 && v <= 0x7E) {
+                          sb.append((char) v);
+                      }
                   }
-                  if (x.contains("STN") || name.contains("STN")) {
-                      return "STN";
+                  return sb.toString().trim();
+              }
+
+              private String classifyMercedesModuleFamily(String raw) {
+                  String x = raw == null ? ""
+                          : raw.toUpperCase(Locale.ROOT);
+
+                  if (x.contains("IC_204")
+                          || x.contains("INSTRUMENT")
+                          || x.contains("KOMBI")
+                          || x.contains("204902")
+                          || x.contains("204442")
+                          || x.contains("212902")
+                          || x.contains("212442")) {
+                      return "IC_204";
                   }
-                  if (x.contains("ELM") || name.contains("ELM")
-                          || name.contains("VGATE") || name.contains("VLINK")) {
-                      return "ELM327";
+                  if (x.contains("SAMF_204")
+                          || x.contains("SAMF")
+                          || x.contains("FRONT SAM")) {
+                      return "SAMF_204";
                   }
-                  return clean(ati).isEmpty() ? "UNKNOWN" : clean(ati);
+                  if (x.contains("SAMR_204")
+                          || x.contains("SAMR")
+                          || x.contains("REAR SAM")) {
+                      return "SAMR_204";
+                  }
+                  if (x.contains("CGW_204")
+                          || x.contains("CGW")
+                          || x.contains("CENTRAL GATEWAY")) {
+                      return "CGW_204";
+                  }
+                  if (x.contains("DOOR")
+                          || x.contains("TUER")
+                          || x.contains("TURSTEUER")) {
+                      return "DOOR_204";
+                  }
+                  return "UNKNOWN";
+              }
+
+              private boolean hasModuleFamily(String family) {
+                  for (ModuleIdentity m : moduleIdentities) {
+                      if (family.equals(m.family)) return true;
+                  }
+                  return false;
+              }
+
+              private String requiredFamilyForActivation(String key) {
+                  if ("needle".equals(key) || "amg".equals(key)
+                          || "speed".equals(key)) return "IC_204";
+                  if ("drl".equals(key) || "welcome".equals(key)
+                          || "confirm".equals(key)) return "SAMF_204";
+                  if ("autolock".equals(key)) return "CGW_204";
+                  if ("mirrors".equals(key)) return "DOOR_204";
+                  return "UNKNOWN";
+              }
+
+              private String profileReferenceForActivation(String key) {
+                  if ("amg".equals(key)) return "IC_204 / SecurityAccess + EEPROM profile";
+                  if ("needle".equals(key)) return "IC_204 / Variant Coding";
+                  if ("speed".equals(key)) return "IC_204 / Variant Coding";
+                  if ("drl".equals(key)) return "SAMF_204 / VCD_tagfahrlicht";
+                  if ("welcome".equals(key)) return "SAMF_204 + CGW_204 / exterior-light profile";
+                  if ("confirm".equals(key)) return "SAMF_204 + CGW_204 / lock-confirmation profile";
+                  if ("autolock".equals(key)) return "CGW_204 / central-lock profile";
+                  if ("mirrors".equals(key)) return "CGW_204 + DOOR_204 / folding-mirror profile";
+                  return "Mercedes coding profile";
+              }
+
+              private String profileStatusForActivation(String key) {
+                  String family = requiredFamilyForActivation(key);
+                  String ref = profileReferenceForActivation(key);
+                  if (!isConnected()) {
+                      return t("Status: asteapta adaptor + Deep Scan • ",
+                              "Status: waiting for adapter + Deep Scan • ") + ref;
+                  }
+                  if (!adapterSupportsProfileCoding()) {
+                      return t("Status: adaptor doar diagnoza • ",
+                              "Status: diagnostics-only adapter • ") + ref;
+                  }
+                  if ("UNKNOWN".equals(family)) {
+                      return t("Status: necesita identificare modul • ",
+                              "Status: module identification required • ") + ref;
+                  }
+                  if (hasModuleFamily(family)) {
+                      return t("Status: familie detectata; profil exact trebuie validat pentru SW • ",
+                              "Status: family detected; exact profile must be validated for SW • ") + ref;
+                  }
+                  return t("Status: modul tinta nu a fost identificat inca • ",
+                          "Status: target module not identified yet • ") + ref;
+              }
+
+              private void refreshActivationProfileBadges() {
+                  for (Map.Entry<String, TextView> e : activationStatusViews.entrySet()) {
+                      if (e.getValue() != null) {
+                          e.getValue().setText(profileStatusForActivation(e.getKey()));
+                      }
+                  }
+              }
+
+              private String buildModuleProfileReport() {
+                  StringBuilder sb = new StringBuilder();
+                  sb.append(t("ADAPTOR\n", "ADAPTER\n"))
+                          .append(adapterKind).append("\n")
+                          .append(adapterDetails).append("\n\n");
+                  if (moduleIdentities.isEmpty()) {
+                      sb.append(t(
+                              "Niciun identificator Mercedes de modul nu a fost retinut in aceasta scanare. Asta poate insemna ca adaptorul/protocolul nu ajunge la modulele de caroserie sau ca modulul foloseste o adresare specifica Mercedes.\n",
+                              "No Mercedes module identifier was retained in this scan. This can mean the adapter/protocol cannot reach body modules or that the module uses Mercedes-specific addressing.\n"));
+                  } else {
+                      sb.append(t("MODULE DETECTATE\n", "DETECTED MODULES\n"));
+                      for (ModuleIdentity m : moduleIdentities) {
+                          sb.append("• TX ").append(m.tx)
+                                  .append(" / RX ").append(m.rx)
+                                  .append("  →  ").append(m.family).append("\n");
+                          if (!m.ascii.isEmpty()) sb.append("  ASCII: ").append(m.ascii).append("\n");
+                          sb.append("  ID: ").append(m.raw).append("\n");
+                      }
+                  }
+                  sb.append("\n").append(t("PROFILE CODING\n", "CODING PROFILES\n"))
+                          .append("IC_204: ").append(hasModuleFamily("IC_204") ? t("familie detectata", "family detected") : t("nedetectat", "not detected"))
+                          .append("\nSAMF_204: ").append(hasModuleFamily("SAMF_204") ? t("familie detectata", "family detected") : t("nedetectat", "not detected"))
+                          .append("\nCGW_204: ").append(hasModuleFamily("CGW_204") ? t("familie detectata", "family detected") : t("nedetectat", "not detected"))
+                          .append("\nDOOR_204: ").append(hasModuleFamily("DOOR_204") ? t("familie detectata", "family detected") : t("nedetectat", "not detected"))
+                          .append("\n\n")
+                          .append(t(
+                                  "BenOBD selecteaza automat familia profilului, dar nu executa o scriere daca identificatorul software nu are o reteta exacta validata. Nu sunt folositi bytes ghiciti.",
+                                  "BenOBD automatically selects the profile family, but does not write unless the software identifier has an exact validated recipe. No guessed bytes are used."));
+                  return sb.toString();
+              }
+
+              private void updateVehicleTabStatus() {
+                  if (vehicleAdapterStatus != null) {
+                      vehicleAdapterStatus.setText(t("Adaptor: ", "Adapter: ") + adapterKind
+                              + (adapterDetails.isEmpty() ? "" : "\n" + adapterDetails));
+                  }
+                  String vin = lastVin;
+                  if (vin == null || vin.length() != 17) vin = prefs.getString("last_vin", "");
+                  if (vehicleVinStatus != null) {
+                      vehicleVinStatus.setText(vin.length() == 17 ? "VIN: " + vin
+                              : t("VIN: asteapta identificarea ECU", "VIN: waiting for ECU identification"));
+                  }
+                  if (vehicleProfileBox != null) {
+                      String profile = prefs.getString("vehicle_profile", "");
+                      if (!profile.isEmpty()) vehicleProfileBox.setText(profile);
+                  }
+                  if (moduleProfileBox != null && !moduleIdentities.isEmpty()) {
+                      moduleProfileBox.setText(buildModuleProfileReport());
+                  }
+              }
+
+              private void decodeVinOnline(String vin) {
+                  if (vin == null || vin.length() != 17) return;
+                  final String requestedVin = vin;
+                  if (vehicleVinStatus != null) {
+                      vehicleVinStatus.setText("VIN: " + requestedVin + " • " + t("decodare...", "decoding..."));
+                  }
+                  io.execute(() -> {
+                      try {
+                          String url = "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/"
+                                  + requestedVin + "?format=json";
+                          String json = httpGet(url);
+                          JSONObject rootJson = new JSONObject(json);
+                          JSONArray results = rootJson.optJSONArray("Results");
+                          if (results == null || results.length() == 0) throw new IllegalStateException("vPIC: no Results");
+                          JSONObject x = results.getJSONObject(0);
+                          StringBuilder sb = new StringBuilder();
+                          sb.append("VIN: ").append(requestedVin).append("\n\n");
+                          appendVinField(sb,x,"Make",t("Marca","Make"),t("Marca decodata din VIN.","Make decoded from VIN."));
+                          appendVinField(sb,x,"Model",t("Model","Model"),t("Modelul raportat de producator.","Model reported by the manufacturer."));
+                          appendVinField(sb,x,"ModelYear",t("An model","Model year"),t("Anul de model asociat VIN-ului.","Model year associated with the VIN."));
+                          appendVinField(sb,x,"Series",t("Serie","Series"),t("Seria/varianta comerciala raportata.","Reported series/commercial variant."));
+                          appendVinField(sb,x,"Trim","Trim",t("Nivelul/versiunea de echipare disponibila in baza VIN.","Trim/equipment level available in VIN data."));
+                          appendVinField(sb,x,"BodyClass",t("Caroserie","Body class"),t("Tipul de caroserie decodat.","Decoded body type."));
+                          appendVinField(sb,x,"Doors",t("Usi","Doors"),t("Numarul de usi raportat.","Reported number of doors."));
+                          appendVinField(sb,x,"EngineModel",t("Motorizare / cod motor","Engine / engine model"),t("Modelul sau codul motorului, daca este disponibil.","Engine model/code when available."));
+                          appendVinField(sb,x,"EngineManufacturer",t("Producator motor","Engine manufacturer"),t("Producatorul motorului din datele VIN.","Engine manufacturer from VIN data."));
+                          appendVinField(sb,x,"DisplacementL",t("Cilindree","Displacement"),t("Cilindreea nominala in litri.","Nominal displacement in litres."));
+                          appendVinField(sb,x,"EngineCylinders",t("Cilindri","Cylinders"),t("Numarul de cilindri raportat.","Reported cylinder count."));
+                          appendVinField(sb,x,"EngineHP",t("Putere motor","Engine power"),t("Puterea declarata, daca este disponibila.","Declared power when available."));
+                          appendVinField(sb,x,"FuelTypePrimary",t("Combustibil","Fuel"),t("Tipul principal de combustibil.","Primary fuel type."));
+                          appendVinField(sb,x,"DriveType",t("Tractiune","Drive type"),t("Configuratia tractiunii.","Drivetrain configuration."));
+                          appendVinField(sb,x,"TransmissionStyle",t("Transmisie","Transmission"),t("Tipul transmisiei raportate.","Reported transmission type."));
+                          appendVinField(sb,x,"TransmissionSpeeds",t("Trepte transmisie","Transmission speeds"),t("Numarul de trepte, daca este disponibil.","Number of gears when available."));
+                          appendVinField(sb,x,"PlantCountry",t("Tara fabricatie","Plant country"),t("Tara uzinei asociate VIN-ului.","Manufacturing plant country."));
+                          appendVinField(sb,x,"PlantCity",t("Oras fabrica","Plant city"),t("Orasul uzinei, daca este disponibil.","Plant city when available."));
+                          sb.append("\n").append(t("DOTARI / SISTEME RAPORTATE\n","REPORTED EQUIPMENT / SYSTEMS\n"));
+                          appendOption(sb,x,"ABS","ABS",t("Sistem antiblocare la franare.","Anti-lock braking system."));
+                          appendOption(sb,x,"ESC","ESP / ESC",t("Control electronic al stabilitatii.","Electronic stability control."));
+                          appendOption(sb,x,"TractionControl",t("Control tractiune","Traction control"),t("Controlul patinarii.","Traction/slip control."));
+                          appendOption(sb,x,"TPMS","TPMS",t("Monitorizarea presiunii in pneuri.","Tyre pressure monitoring."));
+                          appendOption(sb,x,"ParkAssist","Park Assist / PTS",t("Asistenta la parcare raportata.","Reported parking assistance."));
+                          appendOption(sb,x,"AdaptiveCruiseControl","Adaptive Cruise Control",t("Cruise control adaptiv, daca este raportat.","Adaptive cruise control when reported."));
+                          appendOption(sb,x,"BlindSpotMon","Blind Spot",t("Monitorizare unghi mort.","Blind-spot monitoring."));
+                          appendOption(sb,x,"LaneDepartureWarning",t("Avertizare banda","Lane departure warning"),t("Avertizare parasire banda.","Lane departure warning."));
+                          appendOption(sb,x,"LaneKeepSystem","Lane Keep",t("Asistenta mentinere banda.","Lane-keeping assistance."));
+                          appendOption(sb,x,"ForwardCollisionWarning",t("Avertizare coliziune","Forward collision warning"),t("Avertizare coliziune frontala.","Forward collision warning."));
+                          appendOption(sb,x,"KeylessIgnition","Keyless",t("Pornire/acces fara cheie, daca este raportat.","Keyless ignition/access when reported."));
+                          appendOption(sb,x,"DaytimeRunningLight","DRL",t("Lumini de zi raportate in configuratia VIN.","Daytime running lights reported in VIN configuration."));
+                          appendOption(sb,x,"SemiautomaticHeadlampBeamSwitching",t("Asistenta faza lunga","High-beam assistance"),t("Comutare automata/semi-automata a fazei.","Automatic/semi-automatic beam switching."));
+                          appendOption(sb,x,"BackupCamera",t("Camera marsarier","Backup camera"),t("Camera spate raportata in baza VIN.","Rear camera reported in VIN data."));
+                          String errors=x.optString("ErrorText","").trim();
+                          if (!errors.isEmpty() && !errors.startsWith("0 - VIN decoded clean")) sb.append("\n").append(t("NOTA DECODOR: ","DECODER NOTE: ")).append(errors).append("\n");
+                          sb.append("\n").append(t(
+                                  "Nota: vPIC foloseste date publice VIN. Pentru un W204 european, unele campuri pot lipsi. Lipsa unui camp nu inseamna ca masina nu are acea dotare. Mercedes Data Card / codurile SA sunt o sursa separata.",
+                                  "Note: vPIC uses public VIN data. For a European W204, some fields may be missing. A missing field does not mean the car lacks that feature. Mercedes Data Card / SA codes are a separate source."));
+                          final String profile=sb.toString();
+                          prefs.edit().putString("vehicle_profile",profile).putString("last_vin",requestedVin).apply();
+                          appendLog("VIN PROFILE\n"+profile);
+                          main.post(() -> {
+                              lastVin=requestedVin;
+                              if (vehicleProfileBox!=null) vehicleProfileBox.setText(profile);
+                              if (vehicleVinStatus!=null) vehicleVinStatus.setText("VIN: "+requestedVin+" • "+t("profil actualizat","profile updated"));
+                          });
+                      } catch (Exception e) {
+                          appendLog("VIN DECODE ERROR: "+e.getClass().getSimpleName()+" "+e.getMessage());
+                          main.post(() -> {
+                              if (vehicleVinStatus!=null) vehicleVinStatus.setText("VIN: "+requestedVin+" • "+t("decodare indisponibila","decode unavailable"));
+                          });
+                      }
+                  });
+              }
+
+              private String httpGet(String urlString) throws Exception {
+                  HttpURLConnection c=null;
+                  BufferedReader reader=null;
+                  try {
+                      URL u=new URL(urlString);
+                      c=(HttpURLConnection)u.openConnection();
+                      c.setConnectTimeout(6500);
+                      c.setReadTimeout(6500);
+                      c.setRequestMethod("GET");
+                      c.setRequestProperty("Accept","application/json");
+                      c.setRequestProperty("User-Agent","BenOBD/7.0");
+                      int code=c.getResponseCode();
+                      if (code<200 || code>=300) throw new IllegalStateException("HTTP "+code);
+                      reader=new BufferedReader(new InputStreamReader(c.getInputStream(),StandardCharsets.UTF_8));
+                      StringBuilder sb=new StringBuilder();
+                      String line;
+                      while ((line=reader.readLine())!=null) sb.append(line);
+                      return sb.toString();
+                  } finally {
+                      try { if (reader!=null) reader.close(); } catch(Exception ignored) {}
+                      if (c!=null) c.disconnect();
+                  }
+              }
+
+              private void appendVinField(StringBuilder sb, JSONObject x, String key, String label, String description) {
+                  String value=cleanVinValue(x.optString(key,""));
+                  if (value.isEmpty()) return;
+                  sb.append(label).append(": ").append(value).append("\n  ↳ ").append(description).append("\n");
+              }
+
+              private void appendOption(StringBuilder sb, JSONObject x, String key, String label, String description) {
+                  String value=cleanVinValue(x.optString(key,""));
+                  if (value.isEmpty()) return;
+                  sb.append("• ").append(label).append(": ").append(value).append("\n  ↳ ").append(description).append("\n");
+              }
+
+              private String cleanVinValue(String value) {
+                  if (value==null) return "";
+                  String v=value.trim();
+                  if (v.isEmpty() || v.equalsIgnoreCase("Not Applicable") || v.equalsIgnoreCase("Not Available") || v.equalsIgnoreCase("N/A") || v.equalsIgnoreCase("null")) return "";
+                  return v;
+              }
+
+              private void updateActivationAdapterStatus() {
+                  if (activationAdapterStatus == null) return;
+                  StringBuilder sb = new StringBuilder();
+                  sb.append(t("Interfata curenta: ", "Current interface: ")).append(adapterKind);
+                  if (adapterSupportsProfileCoding()) {
+                      sb.append(t("\n✓ STN/OBDLink detectat: raw CAN/UDS disponibil pentru profile validate.",
+                              "\n✓ STN/OBDLink detected: raw CAN/UDS available for validated profiles."));
+                  } else {
+                      sb.append(t("\n• Diagnoza disponibila; coding direct ramane blocat pe acest adaptor.",
+                              "\n• Diagnostics available; direct coding remains locked on this adapter."));
+                  }
+                  if (!adapterDetails.isEmpty()) sb.append("\n").append(adapterDetails);
+                  activationAdapterStatus.setText(sb.toString());
+              }
+
+              private String probeAdapterIdentity(String ati) {
+                  String btName = selectedDevice == null ? ""
+                          : safeName(selectedDevice);
+                  String stdi = tryElmIdentity("STDI");
+                  String sti = tryElmIdentity("STI");
+                  String stix = tryElmIdentity("STIX");
+                  String stsn = tryElmIdentity("STSN");
+
+                  String all = (clean(ati) + " " + clean(stdi) + " "
+                          + clean(sti) + " " + clean(stix) + " "
+                          + btName).toUpperCase(Locale.ROOT);
+
+                  String kind;
+                  if (all.contains("OBDLINK MX+")) {
+                      kind = "OBDLink MX+ / STN";
+                  } else if (all.contains("OBDLINK")) {
+                      kind = "OBDLink / STN";
+                  } else if (all.contains("STN11") || all.contains("STN21")
+                          || all.contains("STN")) {
+                      kind = "STN";
+                  } else if (all.contains("VLINKER") || all.contains("VGATE")) {
+                      kind = "vLinker / Vgate (ELM compatible)";
+                  } else if (all.contains("ELM327") || all.contains("ELM")) {
+                      kind = "ELM327";
+                  } else {
+                      kind = clean(ati).isEmpty() ? "UNKNOWN" : clean(ati);
+                  }
+
+                  adapterDetails = "Bluetooth: " + btName
+                          + "\nATI: " + clean(ati)
+                          + "\nSTDI: " + clean(stdi)
+                          + "\nSTI: " + clean(sti)
+                          + "\nSTIX: " + clean(stix)
+                          + "\nSTSN: " + clean(stsn);
+
+                  return kind;
+              }
+
+              private String tryElmIdentity(String command) {
+                  try {
+                      String r = elm(command, 850);
+                      String x = clean(r);
+                      if (x.equals("?") || x.contains("NO DATA")
+                              || x.contains("ERROR")) return "";
+                      return x;
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+
+              private boolean adapterSupportsProfileCoding() {
+                  String a = adapterKind == null ? "" : adapterKind.toUpperCase(Locale.ROOT);
+                  return a.contains("OBDLINK") || a.equals("STN")
+                          || a.startsWith("STN ");
               }
 
               private void addActivationCard(
@@ -915,6 +1636,12 @@ jobs:
                   TextView noteText = label(note, 11, MUTED, false);
                   noteText.setPadding(0, dp(5), 0, 0);
                   card.addView(noteText);
+
+                  TextView profileBadge = label(
+                          profileStatusForActivation(key), 11, GREEN, false);
+                  profileBadge.setPadding(0, dp(7), 0, 0);
+                  card.addView(profileBadge);
+                  activationStatusViews.put(key, profileBadge);
 
                   sw.setOnCheckedChangeListener((buttonView, checked) -> {
                       if (!buttonView.isPressed()) return;
@@ -953,6 +1680,16 @@ jobs:
                       dialog("Safe Mode",
                               t("Activeaza Force Mode numai dupa Deep Scan si backup.",
                                       "Enable Force Mode only after Deep Scan and backup."));
+                      return;
+                  }
+
+                  String requiredFamily = requiredFamilyForActivation(key);
+                  if (!"UNKNOWN".equals(requiredFamily) && !hasModuleFamily(requiredFamily)) {
+                      dialog(t("Modul tinta nedetectat", "Target module not detected"),
+                              t("BenOBD nu va scrie pana cand Deep Scan nu identifica familia "
+                                              + requiredFamily + ".\n\nProfil: " + profileReferenceForActivation(key),
+                                      "BenOBD will not write until Deep Scan identifies the "
+                                              + requiredFamily + " family.\n\nProfile: " + profileReferenceForActivation(key)));
                       return;
                   }
 
@@ -1112,9 +1849,9 @@ jobs:
                           String ati = elm("ATI", 1000);
                           String volts = elm("ATRV", 900);
                           String proto = elm("ATDP", 900);
-                          adapterKind = detectAdapterKind(ati);
-          
-                          appendLog("ADAPTER: " + clean(ati));
+                          adapterKind = probeAdapterIdentity(ati);
+
+                          appendLog("ADAPTER: " + adapterDetails);
                           appendLog("VOLTAGE: " + clean(volts));
                           appendLog("PROTOCOL: " + clean(proto));
           
@@ -1123,6 +1860,8 @@ jobs:
                                       + safeName(selectedDevice) + " • " + adapterKind
                                       + " • " + clean(volts));
                               updateActivationAdapterStatus();
+                              updateVehicleTabStatus();
+                              refreshActivationProfileBadges();
                               connectButton.setEnabled(true);
                           });
                       } catch (Exception e) {
@@ -1151,8 +1890,9 @@ jobs:
                   io.execute(() -> {
                       StringBuilder sb = new StringBuilder();
                       String[] cmds = {
-                              "ATI", "AT@1", "AT@2", "ATRV", "ATDP", "ATDPN",
-                              "ATH1", "ATH0", "ATAL", "ATCAF1", "ATCFC1", "ATST32"
+                              "ATI", "AT@1", "AT@2", "STDI", "STI", "STIX", "STSN",
+                              "ATRV", "ATDP", "ATDPN", "ATH1", "ATH0",
+                              "ATAL", "ATCAF1", "ATCFC1", "ATST32"
                       };
                       for (String c : cmds) {
                           try {
@@ -1180,22 +1920,568 @@ jobs:
                           String protoNum = elm("ATDPN", 900);
                           String vin = decodeVin(vinRaw);
           
-                          String text = "VIN: " + (vin.isEmpty() ? clean(vinRaw) : vin)
+                          String effectiveVin = vin.isEmpty() ? "" : vin;
+                          if (effectiveVin.length() == 17) {
+                              lastVin = effectiveVin;
+                              prefs.edit().putString("last_vin", effectiveVin).apply();
+                          }
+
+                          String text = "VIN: " + (effectiveVin.isEmpty()
+                                  ? clean(vinRaw) : effectiveVin)
                                   + "\n" + t("Protocol: ", "Protocol: ") + clean(proto)
                                   + " [" + clean(protoNum) + "]"
                                   + "\n" + t("Tensiune: ", "Voltage: ") + clean(volts)
                                   + "\nCalibration ID: " + clean(cal)
                                   + "\nCVN: " + clean(cvn)
-                                  + "\nECU Name: " + clean(ecuName);
-          
+                                  + "\nECU Name: " + clean(ecuName)
+                                  + "\n" + t("Adaptor detectat: ", "Detected adapter: ")
+                                  + adapterKind;
+
                           appendLog("VEHICLE INFO\n" + text);
-                          main.post(() -> vehicleInfo.setText(text));
+                          main.post(() -> {
+                              vehicleInfo.setText(text);
+                              updateVehicleTabStatus();
+                          });
+
+                          if (effectiveVin.length() == 17) {
+                              decodeVinOnline(effectiveVin);
+                          }
                       } catch (Exception e) {
                           appendLog("IDENTIFY ERROR: " + e.getMessage());
                       }
                   });
               }
           
+              private void toggleFullLive() {
+                  if (!requireConnection()) return;
+
+                  allLiveRunning = !allLiveRunning;
+
+                  if (allLiveRunning) {
+                      allLiveButton.setText(t(
+                              "Opreste LIVE TOTAL",
+                              "Stop FULL LIVE"));
+                      main.removeCallbacks(fullLiveTick);
+                      main.post(fullLiveTick);
+                  } else {
+                      allLiveButton.setText(t(
+                              "Porneste LIVE TOTAL",
+                              "Start FULL LIVE"));
+                      main.removeCallbacks(fullLiveTick);
+                      if (allLiveStatus != null) {
+                          allLiveStatus.setText(t(
+                                  "LIVE TOTAL oprit",
+                                  "FULL LIVE stopped"));
+                      }
+                  }
+              }
+
+              private void detectSupportedPidsForFullLive() {
+                  if (!requireConnection()) return;
+
+                  if (allLiveStatus != null) {
+                      allLiveStatus.setText(t(
+                              "Detectez harta completa PID...",
+                              "Detecting complete PID map..."));
+                  }
+
+                  io.execute(() -> {
+                      try {
+                          ArrayList<Integer> found =
+                                  querySupportedMode01Pids();
+
+                          synchronized (supportedMode01Pids) {
+                              supportedMode01Pids.clear();
+                              supportedMode01Pids.addAll(found);
+                          }
+
+                          StringBuilder sb = new StringBuilder();
+                          sb.append(t("PID-uri suportate: ",
+                                  "Supported PIDs: "))
+                                  .append(found.size())
+                                  .append("\n");
+
+                          for (Integer pid : found) {
+                              sb.append(String.format(
+                                      Locale.US, "01%02X", pid))
+                                      .append(" • ")
+                                      .append(pidName(pid))
+                                      .append("\n");
+                          }
+
+                          final String report = sb.toString().trim();
+                          appendLog("SUPPORTED FULL LIVE PIDS\n"
+                                  + report);
+
+                          main.post(() -> {
+                              if (allLiveStatus != null) {
+                                  allLiveStatus.setText(
+                                          t("Detectate ",
+                                                  "Detected ")
+                                                  + found.size()
+                                                  + t(" PID-uri",
+                                                  " PIDs"));
+                              }
+                              if (allLiveBox != null) {
+                                  allLiveBox.setText(report);
+                              }
+                          });
+                      } catch (Exception e) {
+                          appendLog("SUPPORTED PID DETECT ERROR: "
+                                  + e.getMessage());
+                          main.post(() -> {
+                              if (allLiveStatus != null) {
+                                  allLiveStatus.setText(
+                                          "PID DETECT ERROR: "
+                                                  + e.getMessage());
+                              }
+                          });
+                      }
+                  });
+              }
+
+              private ArrayList<Integer> querySupportedMode01Pids()
+                      throws Exception {
+                  ArrayList<Integer> out = new ArrayList<>();
+                  int[] bases = {
+                          0x00, 0x20, 0x40, 0x60,
+                          0x80, 0xA0, 0xC0, 0xE0
+                  };
+
+                  for (int base : bases) {
+                      String cmd = String.format(
+                              Locale.US, "01%02X", base);
+                      String raw = elm(cmd, 1200);
+                      int[] map = findPidBytes(
+                              raw, 0x41, base, 4);
+                      if (map == null) continue;
+
+                      long bits = ((long) map[0] << 24)
+                              | ((long) map[1] << 16)
+                              | ((long) map[2] << 8)
+                              | (long) map[3];
+
+                      for (int i = 0; i < 32; i++) {
+                          long mask = 1L << (31 - i);
+                          if ((bits & mask) != 0) {
+                              int pid = base + i + 1;
+                              if (pid >= 0x01 && pid <= 0xFF
+                                      && !out.contains(pid)) {
+                                  out.add(pid);
+                              }
+                          }
+                      }
+                  }
+
+                  Collections.sort(out);
+                  return out;
+              }
+
+              private int[] mode01Data(
+                      String raw, int pid, int maxBytes) {
+                  int[] all = hexBytes(raw);
+
+                  for (int i = 0; i + 1 < all.length; i++) {
+                      if (all[i] == 0x41
+                              && all[i + 1] == pid) {
+                          int start = i + 2;
+                          int count = 0;
+
+                          while (start + count < all.length
+                                  && count < maxBytes) {
+                              if (count > 0
+                                      && start + count + 1
+                                      < all.length
+                                      && all[start + count] == 0x41) {
+                                  break;
+                              }
+                              count++;
+                          }
+
+                          int[] data = new int[count];
+                          for (int j = 0; j < count; j++) {
+                              data[j] = all[start + j];
+                          }
+                          return data;
+                      }
+                  }
+
+                  return new int[0];
+              }
+
+              private String rawBytes(int[] d) {
+                  if (d == null || d.length == 0) return "NO DATA";
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = 0; i < d.length; i++) {
+                      if (i > 0) sb.append(" ");
+                      sb.append(String.format(
+                              Locale.US, "%02X", d[i]));
+                  }
+                  return sb.toString();
+              }
+
+              private String decodeAnyMode01Pid(
+                      int pid, String raw) {
+                  int[] d = mode01Data(raw, pid, 8);
+                  if (d.length == 0) {
+                      return "RAW: " + clean(raw);
+                  }
+
+                  int a = d.length > 0 ? d[0] : 0;
+                  int b = d.length > 1 ? d[1] : 0;
+                  int c = d.length > 2 ? d[2] : 0;
+                  int e = d.length > 3 ? d[3] : 0;
+                  int ab = (a << 8) | b;
+                  int cd = (c << 8) | e;
+
+                  try {
+                      switch (pid) {
+                          case 0x03:
+                              return "Fuel system status RAW: "
+                                      + rawBytes(d);
+                          case 0x04:
+                              return String.format(
+                                      Locale.US, "%.1f %%", a * 100.0 / 255.0);
+                          case 0x05:
+                          case 0x0F:
+                          case 0x46:
+                          case 0x5C:
+                              return (a - 40) + " °C";
+                          case 0x06:
+                          case 0x07:
+                          case 0x08:
+                          case 0x09:
+                          case 0x55:
+                          case 0x56:
+                          case 0x57:
+                          case 0x58:
+                              return String.format(
+                                      Locale.US, "%.1f %%",
+                                      a * 100.0 / 128.0 - 100.0);
+                          case 0x0A:
+                              return (a * 3) + " kPa";
+                          case 0x0B:
+                          case 0x33:
+                              return a + " kPa";
+                          case 0x0C:
+                              return String.format(
+                                      Locale.US, "%.0f rpm", ab / 4.0);
+                          case 0x0D:
+                              return a + " km/h";
+                          case 0x0E:
+                              return String.format(
+                                      Locale.US, "%.1f °", a / 2.0 - 64.0);
+                          case 0x10:
+                              return String.format(
+                                      Locale.US, "%.2f g/s", ab / 100.0);
+                          case 0x11:
+                          case 0x2C:
+                          case 0x2E:
+                          case 0x2F:
+                          case 0x45:
+                          case 0x47:
+                          case 0x48:
+                          case 0x49:
+                          case 0x4A:
+                          case 0x4B:
+                          case 0x4C:
+                          case 0x52:
+                          case 0x5A:
+                          case 0x5B:
+                              return String.format(
+                                      Locale.US, "%.1f %%", a * 100.0 / 255.0);
+                          case 0x14:
+                          case 0x15:
+                          case 0x16:
+                          case 0x17:
+                          case 0x18:
+                          case 0x19:
+                          case 0x1A:
+                          case 0x1B:
+                              if (d.length >= 2) {
+                                  return String.format(
+                                          Locale.US,
+                                          "O2 %.3f V • trim %.1f %%",
+                                          a / 200.0,
+                                          b * 100.0 / 128.0 - 100.0);
+                              }
+                              break;
+                          case 0x1F:
+                              return formatSeconds(ab);
+                          case 0x21:
+                          case 0x31:
+                              return ab + " km";
+                          case 0x22:
+                              return String.format(
+                                      Locale.US, "%.1f kPa",
+                                      ab * 0.079);
+                          case 0x23:
+                          case 0x59:
+                              return (ab * 10) + " kPa";
+                          case 0x24:
+                          case 0x25:
+                          case 0x26:
+                          case 0x27:
+                          case 0x28:
+                          case 0x29:
+                          case 0x2A:
+                          case 0x2B:
+                              if (d.length >= 4) {
+                                  return String.format(
+                                          Locale.US,
+                                          "lambda %.4f • %.3f V",
+                                          ab * 2.0 / 65536.0,
+                                          cd * 8.0 / 65536.0);
+                              }
+                              break;
+                          case 0x2D:
+                              return String.format(
+                                      Locale.US, "%.1f %%",
+                                      a * 100.0 / 128.0 - 100.0);
+                          case 0x30:
+                              return a + t(" cicluri", " cycles");
+                          case 0x32: {
+                              int signed = ab;
+                              if ((signed & 0x8000) != 0) {
+                                  signed -= 65536;
+                              }
+                              return String.format(
+                                      Locale.US, "%.1f Pa",
+                                      signed / 4.0);
+                          }
+                          case 0x34:
+                          case 0x35:
+                          case 0x36:
+                          case 0x37:
+                          case 0x38:
+                          case 0x39:
+                          case 0x3A:
+                          case 0x3B:
+                              if (d.length >= 4) {
+                                  return String.format(
+                                          Locale.US,
+                                          "lambda %.4f • current %.3f mA",
+                                          ab * 2.0 / 65536.0,
+                                          cd / 256.0 - 128.0);
+                              }
+                              break;
+                          case 0x3C:
+                          case 0x3D:
+                          case 0x3E:
+                          case 0x3F:
+                              return String.format(
+                                      Locale.US, "%.1f °C",
+                                      ab / 10.0 - 40.0);
+                          case 0x42:
+                              return String.format(
+                                      Locale.US, "%.3f V",
+                                      ab / 1000.0);
+                          case 0x43:
+                              return String.format(
+                                      Locale.US, "%.1f %%",
+                                      ab * 100.0 / 255.0);
+                          case 0x44:
+                              return String.format(
+                                      Locale.US, "%.4f",
+                                      ab * 2.0 / 65536.0);
+                          case 0x4D:
+                          case 0x4E:
+                              return ab + " min";
+                          case 0x51:
+                              return fuelTypeName(a)
+                                      + " [0x"
+                                      + String.format(
+                                              Locale.US, "%02X", a)
+                                      + "]";
+                          case 0x5D:
+                              return String.format(
+                                      Locale.US, "%.2f °",
+                                      (ab - 26880) / 128.0);
+                          case 0x5E:
+                              return String.format(
+                                      Locale.US, "%.2f L/h",
+                                      ab * 0.05);
+                          case 0x61:
+                          case 0x62:
+                              return (a - 125) + " %";
+                          case 0x63:
+                              return ab + " Nm";
+                      }
+                  } catch (Exception ignored) {}
+
+                  return "RAW: " + rawBytes(d);
+              }
+
+              private String formatSeconds(int sec) {
+                  int h = sec / 3600;
+                  int m = (sec % 3600) / 60;
+                  int s = sec % 60;
+                  return String.format(
+                          Locale.US, "%02d:%02d:%02d",
+                          h, m, s);
+              }
+
+              private String fuelTypeName(int id) {
+                  switch (id) {
+                      case 1: return "Gasoline";
+                      case 2: return "Methanol";
+                      case 3: return "Ethanol";
+                      case 4: return "Diesel";
+                      case 5: return "LPG";
+                      case 6: return "CNG";
+                      case 7: return "Propane";
+                      case 8: return "Electric";
+                      case 9: return "Bifuel gasoline";
+                      case 10: return "Bifuel methanol";
+                      case 11: return "Bifuel ethanol";
+                      case 12: return "Bifuel LPG";
+                      case 13: return "Bifuel CNG";
+                      case 14: return "Bifuel propane";
+                      case 15: return "Bifuel electric";
+                      case 16: return "Bifuel electric + combustion";
+                      case 17: return "Hybrid gasoline";
+                      case 18: return "Hybrid ethanol";
+                      case 19: return "Hybrid diesel";
+                      case 20: return "Hybrid electric";
+                      case 21: return "Hybrid mixed fuel";
+                      case 22: return "Hybrid regenerative";
+                      default: return t("Necunoscut", "Unknown");
+                  }
+              }
+
+              private String pidName(int pid) {
+                  switch (pid) {
+                      case 0x01: return "Monitor status / MIL / DTC count";
+                      case 0x02: return "Freeze DTC";
+                      case 0x03: return "Fuel system status";
+                      case 0x04: return "Calculated engine load";
+                      case 0x05: return "Coolant temperature";
+                      case 0x06: return "Short fuel trim Bank 1";
+                      case 0x07: return "Long fuel trim Bank 1";
+                      case 0x08: return "Short fuel trim Bank 2";
+                      case 0x09: return "Long fuel trim Bank 2";
+                      case 0x0A: return "Fuel pressure";
+                      case 0x0B: return "Intake manifold pressure";
+                      case 0x0C: return "Engine RPM";
+                      case 0x0D: return "Vehicle speed";
+                      case 0x0E: return "Timing advance";
+                      case 0x0F: return "Intake air temperature";
+                      case 0x10: return "MAF air flow";
+                      case 0x11: return "Throttle position";
+                      case 0x12: return "Secondary air status";
+                      case 0x13: return "O2 sensors present";
+                      case 0x14: return "O2 B1S1";
+                      case 0x15: return "O2 B1S2";
+                      case 0x16: return "O2 B1S3";
+                      case 0x17: return "O2 B1S4";
+                      case 0x18: return "O2 B2S1";
+                      case 0x19: return "O2 B2S2";
+                      case 0x1A: return "O2 B2S3";
+                      case 0x1B: return "O2 B2S4";
+                      case 0x1C: return "OBD standard";
+                      case 0x1D: return "O2 sensors present 4-bank";
+                      case 0x1E: return "Auxiliary input status";
+                      case 0x1F: return "Engine run time";
+                      case 0x21: return "Distance with MIL on";
+                      case 0x22: return "Fuel rail pressure relative";
+                      case 0x23: return "Fuel rail gauge pressure";
+                      case 0x24: return "Wideband O2 B1S1";
+                      case 0x25: return "Wideband O2 B1S2";
+                      case 0x26: return "Wideband O2 B1S3";
+                      case 0x27: return "Wideband O2 B1S4";
+                      case 0x28: return "Wideband O2 B2S1";
+                      case 0x29: return "Wideband O2 B2S2";
+                      case 0x2A: return "Wideband O2 B2S3";
+                      case 0x2B: return "Wideband O2 B2S4";
+                      case 0x2C: return "Commanded EGR";
+                      case 0x2D: return "EGR error";
+                      case 0x2E: return "Commanded evaporative purge";
+                      case 0x2F: return "Fuel tank level";
+                      case 0x30: return "Warm-ups since codes cleared";
+                      case 0x31: return "Distance since codes cleared";
+                      case 0x32: return "Evap system vapor pressure";
+                      case 0x33: return "Barometric pressure";
+                      case 0x34: return "Wideband O2 current B1S1";
+                      case 0x35: return "Wideband O2 current B1S2";
+                      case 0x36: return "Wideband O2 current B1S3";
+                      case 0x37: return "Wideband O2 current B1S4";
+                      case 0x38: return "Wideband O2 current B2S1";
+                      case 0x39: return "Wideband O2 current B2S2";
+                      case 0x3A: return "Wideband O2 current B2S3";
+                      case 0x3B: return "Wideband O2 current B2S4";
+                      case 0x3C: return "Catalyst temperature B1S1";
+                      case 0x3D: return "Catalyst temperature B2S1";
+                      case 0x3E: return "Catalyst temperature B1S2";
+                      case 0x3F: return "Catalyst temperature B2S2";
+                      case 0x41: return "Monitor status this drive cycle";
+                      case 0x42: return "Control module voltage";
+                      case 0x43: return "Absolute engine load";
+                      case 0x44: return "Commanded equivalence ratio";
+                      case 0x45: return "Relative throttle position";
+                      case 0x46: return "Ambient air temperature";
+                      case 0x47: return "Absolute throttle B";
+                      case 0x48: return "Absolute throttle C";
+                      case 0x49: return "Accelerator pedal D";
+                      case 0x4A: return "Accelerator pedal E";
+                      case 0x4B: return "Accelerator pedal F";
+                      case 0x4C: return "Commanded throttle actuator";
+                      case 0x4D: return "Time run with MIL on";
+                      case 0x4E: return "Time since DTC cleared";
+                      case 0x51: return "Fuel type";
+                      case 0x52: return "Ethanol fuel percentage";
+                      case 0x55: return "Short secondary O2 trim B1/B3";
+                      case 0x56: return "Long secondary O2 trim B1/B3";
+                      case 0x57: return "Short secondary O2 trim B2/B4";
+                      case 0x58: return "Long secondary O2 trim B2/B4";
+                      case 0x59: return "Fuel rail absolute pressure";
+                      case 0x5A: return "Relative accelerator pedal";
+                      case 0x5B: return "Hybrid battery remaining";
+                      case 0x5C: return "Engine oil temperature";
+                      case 0x5D: return "Fuel injection timing";
+                      case 0x5E: return "Engine fuel rate";
+                      case 0x61: return "Driver demand torque";
+                      case 0x62: return "Actual engine torque";
+                      case 0x63: return "Engine reference torque";
+                      case 0x64: return "Engine percent torque data";
+                      case 0x65: return "Auxiliary input/output support";
+                      case 0x66: return "MAF sensor data";
+                      case 0x67: return "Engine coolant temperature sensors";
+                      case 0x68: return "Intake air temperature sensors";
+                      case 0x69: return "Commanded EGR / EGR error";
+                      case 0x6A: return "Commanded diesel intake air flow";
+                      case 0x6B: return "EGR temperature";
+                      case 0x6C: return "Commanded throttle actuator data";
+                      case 0x6D: return "Fuel pressure control";
+                      case 0x6E: return "Injection pressure control";
+                      case 0x6F: return "Turbocharger compressor inlet pressure";
+                      case 0x70: return "Boost pressure control";
+                      case 0x71: return "Variable geometry turbo control";
+                      case 0x72: return "Wastegate control";
+                      case 0x73: return "Exhaust pressure";
+                      case 0x74: return "Turbocharger RPM";
+                      case 0x75: return "Turbocharger temperature A";
+                      case 0x76: return "Turbocharger temperature B";
+                      case 0x77: return "Charge air cooler temperature";
+                      case 0x78: return "Exhaust gas temperature Bank 1";
+                      case 0x79: return "Exhaust gas temperature Bank 2";
+                      case 0x7A: return "Diesel particulate filter differential pressure";
+                      case 0x7B: return "Diesel particulate filter";
+                      case 0x7C: return "DPF temperature";
+                      case 0x7D: return "NOx NTE status";
+                      case 0x7E: return "PM NTE status";
+                      case 0x7F: return "Engine run time detailed";
+                      case 0x83: return "NOx sensor";
+                      case 0x84: return "Manifold surface temperature";
+                      case 0x85: return "NOx reagent system";
+                      case 0x86: return "Particulate matter sensor";
+                      case 0x87: return "Intake manifold absolute pressure";
+                      default:
+                          return String.format(
+                                  Locale.US,
+                                  "SAE Mode 01 PID 0x%02X", pid);
+                  }
+              }
+
               private void toggleLive() {
                   if (!requireConnection()) return;
                   liveRunning = !liveRunning;
@@ -1442,6 +2728,7 @@ jobs:
           
               private String runDeepUdsScanInternal() throws Exception {
                   StringBuilder report = new StringBuilder();
+                  moduleIdentities.clear();
                   elm("ATSP6", 1300);
                   elm("ATH1", 800);
                   elm("ATS1", 800);
@@ -1472,16 +2759,21 @@ jobs:
                       if (isUseful(tester)) report.append("TesterPresent: ").append(clean(tester)).append("\n");
                       if (isUseful(obdProbe)) report.append("OBD Probe: ").append(clean(obdProbe)).append("\n");
           
+                      StringBuilder identityRaw = new StringBuilder();
                       String[] idDids = {
                               "22F190", "22F187", "22F189", "22F18A", "22F18C"
                       };
                       for (String q : idDids) {
                           String r = elm(q, 1400);
                           if (isUseful(r)) {
+                              String cr = clean(r);
                               report.append(q).append(": ")
-                                      .append(clean(r)).append(nrcSuffix(r)).append("\n");
+                                      .append(cr).append(nrcSuffix(r)).append("\n");
+                              identityRaw.append(q).append("=")
+                                      .append(cr).append(" | ");
                           }
                       }
+                      registerDetectedModule(txs, rxs, identityRaw.toString());
           
                       String count = elm("1901FF", 1400);
                       if (isUseful(count)) {
@@ -1580,10 +2872,17 @@ jobs:
                   } else {
                       report.insert(0, t("Module CAN detectate: ", "Detected CAN modules: ") + found + "\n");
                   }
-          
+                  final String profileReport = buildModuleProfileReport();
+                  main.post(() -> {
+                      if (moduleProfileBox != null) {
+                          moduleProfileBox.setText(profileReport);
+                      }
+                      refreshActivationProfileBadges();
+                  });
+
                   return report.toString().trim();
               }
-          
+
               private void setCanHeader(String tx, String rx) throws Exception {
                   elm("ATSH" + tx, 700);
                   String r = elm("ATCRA" + rx, 700);
@@ -2416,7 +3715,9 @@ jobs:
           
               private void closeSocket() {
                   liveRunning = false;
+                  allLiveRunning = false;
                   main.removeCallbacks(liveTick);
+                  main.removeCallbacks(fullLiveTick);
           
                   try { if (input != null) input.close(); } catch (Exception ignored) {}
                   try { if (output != null) output.close(); } catch (Exception ignored) {}
@@ -2431,6 +3732,7 @@ jobs:
               protected void onDestroy() {
                   main.removeCallbacks(obdClock);
                   main.removeCallbacks(deepClock);
+                  main.removeCallbacks(fullLiveTick);
                   closeSocket();
                   io.shutdownNow();
                   super.onDestroy();
@@ -2615,11 +3917,11 @@ jobs:
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v6.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v7.1.apk
 
-      - name: Upload BenOBD v6 APK
+      - name: Upload BenOBD v7.1 APK
         uses: actions/upload-artifact@v4
         with:
-          name: BenOBD-v6-APK
-          path: BenOBD-v6.apk
+          name: BenOBD-v7.1-APK
+          path: BenOBD-v7.1.apk
           retention-days: 30
