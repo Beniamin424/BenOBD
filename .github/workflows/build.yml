@@ -1,4 +1,4 @@
-name: Build BenOBD v3 APK
+name: Build BenOBD v4 Deep Diagnostics APK
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Create BenOBD v3 Android project
+      - name: Create BenOBD v4 Android project
         shell: bash
         run: |
           mkdir -p app/src/main/java/ro/benobd/app
@@ -79,8 +79,8 @@ jobs:
                   applicationId "ro.benobd.app"
                   minSdk 26
                   targetSdk 35
-                  versionCode 4
-                  versionName "3.0.0"
+                  versionCode 5
+                  versionName "4.0.0"
               }
           }
           EOF
@@ -131,7 +131,7 @@ jobs:
 
           cat > app/src/main/java/ro/benobd/app/MainActivity.java <<'EOF'
           package ro.benobd.app;
-
+          
           import android.Manifest;
           import android.app.Activity;
           import android.app.AlertDialog;
@@ -150,30 +150,35 @@ jobs:
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.text.InputType;
           import android.view.Gravity;
-          import android.view.View;
           import android.view.ViewGroup;
           import android.widget.Button;
-          import android.widget.CompoundButton;
+          import android.widget.EditText;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
           import android.widget.Switch;
           import android.widget.TextView;
           import android.widget.Toast;
-
+          
           import java.io.InputStream;
           import java.io.OutputStream;
           import java.nio.charset.StandardCharsets;
           import java.util.ArrayList;
           import java.util.Arrays;
+          import java.util.Collections;
+          import java.util.Comparator;
+          import java.util.HashSet;
           import java.util.List;
           import java.util.Locale;
           import java.util.Set;
           import java.util.UUID;
           import java.util.concurrent.ExecutorService;
           import java.util.concurrent.Executors;
-
+          import java.util.regex.Matcher;
+          import java.util.regex.Pattern;
+          
           public class MainActivity extends Activity {
               private static final int BG = Color.rgb(8, 10, 12);
               private static final int CARD = Color.rgb(18, 21, 24);
@@ -183,33 +188,47 @@ jobs:
               private static final int ACCENT = Color.rgb(218, 226, 231);
               private static final int GREEN = Color.rgb(91, 219, 146);
               private static final int RED = Color.rgb(245, 110, 110);
-              private static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
-
+          
+              private static final UUID SPP =
+                      UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+          
               private final ExecutorService io = Executors.newSingleThreadExecutor();
               private final Handler main = new Handler(Looper.getMainLooper());
-
+          
               private BluetoothAdapter adapter;
               private BluetoothDevice selectedDevice;
               private BluetoothSocket socket;
               private InputStream input;
               private OutputStream output;
-
+          
               private LinearLayout root;
               private TextView status;
               private TextView vehicleInfo;
               private TextView dtcBox;
+              private TextView deepBox;
               private TextView log;
               private Button connectButton;
               private Button liveButton;
               private Button dtcButton;
+              private Button deepButton;
               private Button clearButton;
+          
+              private EditText expertTx;
+              private EditText expertRx;
+              private EditText expertCmd;
+          
               private boolean liveRunning = false;
               private boolean english;
               private boolean forceMode;
               private SharedPreferences prefs;
-
-              private TextView rpmV, speedV, coolantV, intakeV, loadV, throttleV, mafV, mapV, fuelV, timingV, voltageV, ambientV;
-
+          
+              private TextView rpmV, speedV, coolantV, intakeV, loadV, throttleV, mafV, mapV,
+                      fuelV, timingV, voltageV, ambientV, baroV, runtimeV, oilTempV, fuelRateV,
+                      distClearV, obdStdV;
+          
+              private String currentScanText = "";
+              private String latestUdsReport = "";
+          
               private final Runnable liveTick = new Runnable() {
                   @Override public void run() {
                       if (!liveRunning || !isConnected()) return;
@@ -227,6 +246,13 @@ jobs:
                               String timing = pid("0E", 1, "timing");
                               String moduleV = pid("42", 2, "voltage");
                               String ambient = pid("46", 1, "temp");
+                              String baro = pid("33", 1, "map");
+                              String runtime = pid("1F", 2, "seconds");
+                              String oilTemp = pid("5C", 1, "temp");
+                              String fuelRate = pid("5E", 2, "fuelrate");
+                              String distClear = pid("31", 2, "distance");
+                              String obdStd = pid("1C", 1, "obdstd");
+          
                               main.post(() -> {
                                   rpmV.setText(rpm);
                                   speedV.setText(speed);
@@ -240,16 +266,22 @@ jobs:
                                   timingV.setText(timing);
                                   voltageV.setText(moduleV);
                                   ambientV.setText(ambient);
+                                  baroV.setText(baro);
+                                  runtimeV.setText(runtime);
+                                  oilTempV.setText(oilTemp);
+                                  fuelRateV.setText(fuelRate);
+                                  distClearV.setText(distClear);
+                                  obdStdV.setText(obdStd);
                               });
                           } catch (Exception e) {
                               appendLog("LIVE ERROR: " + e.getMessage());
                           } finally {
-                              main.postDelayed(liveTick, 4500);
+                              main.postDelayed(liveTick, 5000);
                           }
                       });
                   }
               };
-
+          
               @Override
               protected void onCreate(Bundle state) {
                   super.onCreate(state);
@@ -259,35 +291,36 @@ jobs:
                   requestBtPermission();
                   drawUi();
               }
-
+          
               private void drawUi() {
                   ScrollView scroll = new ScrollView(this);
                   scroll.setFillViewport(true);
                   scroll.setBackgroundColor(BG);
-
+          
                   root = new LinearLayout(this);
                   root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(16), dp(12), dp(16), dp(42));
+                  root.setPadding(dp(16), dp(12), dp(16), dp(44));
                   scroll.addView(root, new ScrollView.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.WRAP_CONTENT));
-
+          
                   LinearLayout header = cardHorizontal();
                   ImageView logo = new ImageView(this);
                   logo.setImageResource(ro.benobd.app.R.drawable.w204_icon);
                   logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                  header.addView(logo, new LinearLayout.LayoutParams(dp(82), dp(82)));
-
+                  header.addView(logo, new LinearLayout.LayoutParams(dp(86), dp(86)));
+          
                   LinearLayout headText = new LinearLayout(this);
                   headText.setOrientation(LinearLayout.VERTICAL);
                   headText.setPadding(dp(14), 0, 0, 0);
-                  TextView title = label("BenOBD", 28, TEXT, true);
-                  TextView subtitle = label(t("Mercedes W204 Diagnostic Suite", "Mercedes W204 Diagnostic Suite"), 14, MUTED, false);
-                  headText.addView(title);
-                  headText.addView(subtitle);
-                  header.addView(headText, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                  headText.addView(label("BenOBD", 29, TEXT, true));
+                  headText.addView(label(t("Mercedes W204 Deep Diagnostics", "Mercedes W204 Deep Diagnostics"),
+                          14, MUTED, false));
+                  headText.addView(label("v4.0 • Read-first architecture", 11, GREEN, false));
+                  header.addView(headText, new LinearLayout.LayoutParams(
+                          0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                   root.addView(header, section());
-
+          
                   LinearLayout langRow = cardHorizontal();
                   langRow.addView(label(t("Limba interfetei", "Interface language"), 15, TEXT, false),
                           new LinearLayout.LayoutParams(0, dp(46), 1));
@@ -299,108 +332,188 @@ jobs:
                   });
                   langRow.addView(lang, new LinearLayout.LayoutParams(dp(76), dp(44)));
                   root.addView(langRow, section());
-
-                  sectionTitle(t("Conexiune", "Connection"));
-
+          
+                  sectionTitle(t("Conexiune si adaptor", "Connection and adapter"));
+          
                   status = label(t("Neconectat", "Disconnected"), 15, MUTED, false);
                   status.setPadding(dp(12), dp(10), dp(12), dp(10));
                   status.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
                   root.addView(status, smallGap());
-
-                  Button choose = button(t("Alege adaptorul ELM327", "Choose ELM327 adapter"));
+          
+                  Button choose = button(t("Alege adaptorul Bluetooth", "Choose Bluetooth adapter"));
                   choose.setOnClickListener(v -> choosePairedDevice());
                   root.addView(choose, smallGap());
-
+          
                   connectButton = button(t("Conecteaza", "Connect"));
                   connectButton.setOnClickListener(v -> connectSelected());
                   root.addView(connectButton, smallGap());
-
+          
+                  Button adapterTest = secondaryButton(t("Test complet adaptor ELM/STN", "Full ELM/STN adapter test"));
+                  adapterTest.setOnClickListener(v -> runAdapterTest());
+                  root.addView(adapterTest, smallGap());
+          
                   Button identify = button(t("Identifica masina / ECU", "Identify vehicle / ECU"));
                   identify.setOnClickListener(v -> readVehicleInfo());
                   root.addView(identify, smallGap());
-
-                  vehicleInfo = monoBox(t("VIN, protocol, tensiune si identificare ECU vor aparea aici.",
-                          "VIN, protocol, voltage and ECU identification will appear here."));
+          
+                  vehicleInfo = monoBox(t(
+                          "VIN, protocol, tensiune, Calibration ID, CVN si identificare ECU vor aparea aici.",
+                          "VIN, protocol, voltage, Calibration ID, CVN and ECU identification will appear here."));
                   root.addView(vehicleInfo, section());
-
-                  sectionTitle(t("Parametri live", "Live data"));
-
-                  LinearLayout grid1 = new LinearLayout(this);
-                  grid1.setOrientation(LinearLayout.HORIZONTAL);
+          
+                  sectionTitle(t("Parametri live extinsi", "Extended live data"));
+          
+                  LinearLayout grid1 = row();
                   rpmV = metric(grid1, "RPM");
                   speedV = metric(grid1, t("Viteza", "Speed"));
                   root.addView(grid1, smallGap());
-
-                  LinearLayout grid2 = new LinearLayout(this);
-                  grid2.setOrientation(LinearLayout.HORIZONTAL);
+          
+                  LinearLayout grid2 = row();
                   coolantV = metric(grid2, t("Lichid racire", "Coolant"));
                   intakeV = metric(grid2, t("Aer admisie", "Intake air"));
                   root.addView(grid2, smallGap());
-
-                  LinearLayout grid3 = new LinearLayout(this);
-                  grid3.setOrientation(LinearLayout.HORIZONTAL);
+          
+                  LinearLayout grid3 = row();
                   loadV = metric(grid3, t("Sarcina motor", "Engine load"));
                   throttleV = metric(grid3, t("Acceleratie", "Throttle"));
                   root.addView(grid3, smallGap());
-
-                  LinearLayout grid4 = new LinearLayout(this);
-                  grid4.setOrientation(LinearLayout.HORIZONTAL);
+          
+                  LinearLayout grid4 = row();
                   mafV = metric(grid4, "MAF");
                   mapV = metric(grid4, "MAP");
                   root.addView(grid4, smallGap());
-
-                  LinearLayout grid5 = new LinearLayout(this);
-                  grid5.setOrientation(LinearLayout.HORIZONTAL);
+          
+                  LinearLayout grid5 = row();
                   fuelV = metric(grid5, t("Nivel combustibil", "Fuel level"));
                   timingV = metric(grid5, t("Avans", "Timing"));
                   root.addView(grid5, smallGap());
-
-                  LinearLayout grid6 = new LinearLayout(this);
-                  grid6.setOrientation(LinearLayout.HORIZONTAL);
+          
+                  LinearLayout grid6 = row();
                   voltageV = metric(grid6, t("Tensiune ECU", "ECU voltage"));
                   ambientV = metric(grid6, t("Temp. ambient", "Ambient temp"));
                   root.addView(grid6, smallGap());
-
+          
+                  LinearLayout grid7 = row();
+                  baroV = metric(grid7, t("Pres. barometrica", "Barometric pressure"));
+                  runtimeV = metric(grid7, t("Timp motor", "Engine runtime"));
+                  root.addView(grid7, smallGap());
+          
+                  LinearLayout grid8 = row();
+                  oilTempV = metric(grid8, t("Temp. ulei", "Oil temperature"));
+                  fuelRateV = metric(grid8, t("Consum instant ECU", "ECU fuel rate"));
+                  root.addView(grid8, smallGap());
+          
+                  LinearLayout grid9 = row();
+                  distClearV = metric(grid9, t("Km de la stergere", "Distance since clear"));
+                  obdStdV = metric(grid9, t("Standard OBD", "OBD standard"));
+                  root.addView(grid9, smallGap());
+          
                   liveButton = button(t("Porneste Live Data", "Start Live Data"));
                   liveButton.setOnClickListener(v -> toggleLive());
                   root.addView(liveButton, section());
-
-                  Button supported = secondaryButton(t("Scaneaza PID-uri suportate", "Scan supported PIDs"));
+          
+                  Button supported = secondaryButton(t("Scaneaza toate intervalele PID", "Scan all supported PID ranges"));
                   supported.setOnClickListener(v -> scanSupportedPids());
                   root.addView(supported, smallGap());
-
-                  sectionTitle(t("Diagnoza OBD-II", "OBD-II diagnostics"));
-
-                  dtcButton = button(t("Citeste erorile", "Read trouble codes"));
-                  dtcButton.setOnClickListener(v -> readDtcs());
+          
+                  sectionTitle(t("Diagnoza OBD-II completa", "Complete OBD-II diagnostics"));
+          
+                  dtcButton = button(t("Scan complet erori si memorii OBD", "Full OBD fault-memory scan"));
+                  dtcButton.setOnClickListener(v -> fullObdScan());
                   root.addView(dtcButton, smallGap());
-
+          
+                  Button freeze = secondaryButton(t("Citeste Freeze Frame", "Read Freeze Frame"));
+                  freeze.setOnClickListener(v -> readFreezeFrame());
+                  root.addView(freeze, smallGap());
+          
+                  Button mode6 = secondaryButton(t("Citeste Mode 06 / monitoare interne", "Read Mode 06 / onboard monitors"));
+                  mode6.setOnClickListener(v -> readMode06());
+                  root.addView(mode6, smallGap());
+          
                   Button readiness = secondaryButton(t("Readiness / Check Engine", "Readiness / Check Engine"));
                   readiness.setOnClickListener(v -> readReadiness());
                   root.addView(readiness, smallGap());
-
-                  clearButton = dangerButton(t("Sterge erorile OBD", "Clear OBD trouble codes"));
+          
+                  clearButton = dangerButton(t("Sterge erorile OBD standard", "Clear standard OBD trouble codes"));
                   clearButton.setOnClickListener(v -> confirmClear());
                   root.addView(clearButton, smallGap());
-
-                  dtcBox = monoBox(t("Erorile stocate, pending si permanente vor aparea aici.",
-                          "Stored, pending and permanent trouble codes will appear here."));
+          
+                  dtcBox = monoBox(t(
+                          "Aici vor aparea erorile STORED, PENDING, PERMANENT si informatiile asociate.",
+                          "STORED, PENDING, PERMANENT faults and related information will appear here."));
                   root.addView(dtcBox, section());
-
+          
+                  sectionTitle(t("Mercedes Deep Scan - Read Only", "Mercedes Deep Scan - Read Only"));
+          
+                  TextView deepInfo = label(t(
+                          "Scaneaza adresarea CAN de diagnoza 7E0-7E7 si incearca servicii UDS numai de citire: identificare ECU, memoria DTC, status bits, mirror memory, permanent status, snapshots si extended data unde modulul le suporta.",
+                          "Scans diagnostic CAN addresses 7E0-7E7 and tries read-only UDS services: ECU identification, DTC memory, status bits, mirror memory, permanent status, snapshots and extended data where supported."),
+                          12, MUTED, false);
+                  deepInfo.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  deepInfo.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
+                  root.addView(deepInfo, smallGap());
+          
+                  deepButton = button(t("Porneste Mercedes Deep Scan", "Start Mercedes Deep Scan"));
+                  deepButton.setOnClickListener(v -> deepUdsScan());
+                  root.addView(deepButton, smallGap());
+          
+                  Button canMonitor = secondaryButton(t("Monitor CAN pasiv 5 secunde", "Passive CAN monitor 5 seconds"));
+                  canMonitor.setOnClickListener(v -> passiveCanMonitor());
+                  root.addView(canMonitor, smallGap());
+          
+                  deepBox = monoBox(t(
+                          "Rezultatele UDS si statusurile DTC vor aparea aici. Unele module W204 folosesc adresari/protocoale proprietare care necesita profil Mercedes validat.",
+                          "UDS results and DTC status will appear here. Some W204 modules use proprietary addressing/protocols that require a validated Mercedes profile."));
+                  root.addView(deepBox, section());
+          
+                  sectionTitle(t("Istoric scanari", "Scan history"));
+          
+                  Button saveSnapshot = secondaryButton(t("Salveaza scanarea curenta", "Save current scan snapshot"));
+                  saveSnapshot.setOnClickListener(v -> saveSnapshot());
+                  root.addView(saveSnapshot, smallGap());
+          
+                  Button compareSnapshot = secondaryButton(t("Compara cu scanarea precedenta", "Compare with previous scan"));
+                  compareSnapshot.setOnClickListener(v -> compareWithPrevious());
+                  root.addView(compareSnapshot, smallGap());
+          
+                  sectionTitle(t("Expert UDS Read-Only", "Expert UDS Read-Only"));
+          
+                  expertTx = edit("7E0");
+                  expertRx = edit("7E8");
+                  expertCmd = edit("1902FF");
+          
+                  root.addView(fieldCard(t("TX CAN ID", "TX CAN ID"), expertTx), smallGap());
+                  root.addView(fieldCard(t("RX CAN ID", "RX CAN ID"), expertRx), smallGap());
+                  root.addView(fieldCard(t("Comanda HEX de citire", "Read-only HEX command"), expertCmd), smallGap());
+          
+                  Button expertRead = secondaryButton(t("Trimite comanda Read-Only", "Send Read-Only command"));
+                  expertRead.setOnClickListener(v -> expertReadOnlyCommand());
+                  root.addView(expertRead, smallGap());
+          
+                  Button udsClear = dangerButton(t("Sterge DTC pe modulul selectat (UDS)", "Clear DTC on selected module (UDS)"));
+                  udsClear.setOnClickListener(v -> confirmUdsClear());
+                  root.addView(udsClear, smallGap());
+          
+                  TextView expertHint = label(t(
+                          "Terminalul blocheaza implicit servicii de scriere/codare precum 2E, 2F, 31, 34-37, 27, 28 si 85. Pentru diagnoza adanca sunt permise doar servicii de citire.",
+                          "The terminal blocks write/coding services such as 2E, 2F, 31, 34-37, 27, 28 and 85. Deep diagnostics only allows read services."),
+                          11, GREEN, false);
+                  expertHint.setPadding(dp(10), dp(10), dp(10), dp(10));
+                  root.addView(expertHint, smallGap());
+          
                   sectionTitle(t("Codari si activari", "Coding and activations"));
-
+          
                   Switch force = makeSwitch(
                           t("Force Mode experimental", "Experimental Force Mode"),
-                          t("Permite folosirea profilelor Mercedes verificate. Sistemele critice raman excluse.",
-                                  "Allows verified Mercedes profiles. Critical systems remain excluded.")
-                  );
+                          t("Activeaza doar profile Mercedes verificate. Sistemele critice raman blocate.",
+                                  "Only enables verified Mercedes profiles. Critical systems remain blocked."));
                   force.setOnCheckedChangeListener((b, checked) -> {
                       forceMode = checked;
                       toast(checked ? t("Force Mode activ.", "Force Mode enabled.")
                               : t("Safe Mode activ.", "Safe Mode enabled."));
                   });
                   root.addView(force, smallGap());
-
+          
                   addCodingSwitch("needle", "Needle Sweep");
                   addCodingSwitch("amg", "AMG Menu / Display");
                   addCodingSwitch("speed", t("Viteza digitala", "Digital speed"));
@@ -409,29 +522,65 @@ jobs:
                   addCodingSwitch("drl", "DRL");
                   addCodingSwitch("welcome", "Coming Home / Welcome Lights");
                   addCodingSwitch("confirm", t("Confirmare lumini la inchidere", "Lock light confirmation"));
-
-                  TextView safe = label(
-                          t("ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor si TCU nu sunt scrise de Force Mode.",
-                                  "ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU and TCU are never written by Force Mode."),
+          
+                  TextView safe = label(t(
+                          "BenOBD v4 nu scrie arbitrar in ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor sau TCU. Pentru aceste module foloseste doar diagnoza Read-Only pana exista profil validat.",
+                          "BenOBD v4 never writes arbitrary data to ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU or TCU. These modules remain Read-Only until a validated profile exists."),
                           12, GREEN, false);
                   safe.setPadding(dp(10), dp(10), dp(10), dp(10));
                   root.addView(safe, smallGap());
-
-                  sectionTitle(t("Jurnal tehnic", "Technical log"));
-                  log = monoBox(t("BenOBD v3 pornit.", "BenOBD v3 started."));
+          
+                  sectionTitle(t("Jurnal tehnic complet", "Full technical log"));
+          
+                  log = monoBox(t("BenOBD v4 pornit.", "BenOBD v4 started."));
                   root.addView(log, smallGap());
-
-                  Button copyLog = secondaryButton(t("Copiaza jurnalul", "Copy log"));
+          
+                  Button copyLog = secondaryButton(t("Copiaza jurnalul complet", "Copy full log"));
                   copyLog.setOnClickListener(v -> {
-                      ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                      ClipboardManager cm =
+                              (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
                       cm.setPrimaryClip(ClipData.newPlainText("BenOBD log", log.getText()));
                       toast(t("Jurnal copiat.", "Log copied."));
                   });
                   root.addView(copyLog, smallGap());
-
+          
+                  Button clearLog = secondaryButton(t("Goleste jurnalul", "Clear log"));
+                  clearLog.setOnClickListener(v -> log.setText(t("Jurnal golit.", "Log cleared.")));
+                  root.addView(clearLog, smallGap());
+          
                   setContentView(scroll);
               }
-
+          
+              private LinearLayout row() {
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.HORIZONTAL);
+                  return l;
+              }
+          
+              private LinearLayout fieldCard(String name, EditText e) {
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  l.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
+                  l.addView(label(name, 12, MUTED, false));
+                  l.addView(e);
+                  return l;
+              }
+          
+              private EditText edit(String value) {
+                  EditText e = new EditText(this);
+                  e.setText(value);
+                  e.setTextColor(TEXT);
+                  e.setHintTextColor(MUTED);
+                  e.setSingleLine(true);
+                  e.setTextSize(15);
+                  e.setInputType(InputType.TYPE_CLASS_TEXT
+                          | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                          | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+                  e.setBackgroundColor(Color.TRANSPARENT);
+                  return e;
+              }
+          
               private void sectionTitle(String text) {
                   TextView t = label(text, 20, TEXT, true);
                   LinearLayout.LayoutParams p = params();
@@ -439,60 +588,63 @@ jobs:
                   p.bottomMargin = dp(4);
                   root.addView(t, p);
               }
-
+          
               private TextView metric(LinearLayout row, String name) {
                   LinearLayout box = new LinearLayout(this);
                   box.setOrientation(LinearLayout.VERTICAL);
                   box.setPadding(dp(12), dp(12), dp(12), dp(12));
                   box.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
-
+          
                   TextView n = label(name, 12, MUTED, false);
-                  TextView v = label("--", 22, TEXT, true);
+                  TextView v = label("--", 21, TEXT, true);
                   box.addView(n);
                   box.addView(v);
-
-                  LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
+          
+                  LinearLayout.LayoutParams p =
+                          new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1);
                   p.setMargins(dp(3), dp(3), dp(3), dp(3));
                   row.addView(box, p);
                   return v;
               }
-
+          
               private void choosePairedDevice() {
                   if (!hasBtPermission()) {
                       requestBtPermission();
                       return;
                   }
                   if (adapter == null) {
-                      dialog("Bluetooth", t("Bluetooth indisponibil pe acest telefon.", "Bluetooth unavailable on this phone."));
+                      dialog("Bluetooth",
+                              t("Bluetooth indisponibil pe acest telefon.",
+                                      "Bluetooth unavailable on this phone."));
                       return;
                   }
-
+          
                   Set<BluetoothDevice> bonded = adapter.getBondedDevices();
                   List<BluetoothDevice> devices = new ArrayList<>();
-
-                  if (bonded != null) {
-                      for (BluetoothDevice d : bonded) {
-                          String n = safeName(d);
-                          String low = n.toLowerCase(Locale.ROOT);
-                          if (low.contains("elm") || low.contains("obd") || low.contains("vgate")
-                                  || low.contains("vlink") || low.contains("obdii")) {
-                              devices.add(d);
-                          }
+                  if (bonded != null) devices.addAll(bonded);
+          
+                  Collections.sort(devices, new Comparator<BluetoothDevice>() {
+                      @Override public int compare(BluetoothDevice a, BluetoothDevice b) {
+                          boolean aa = looksLikeObd(safeName(a));
+                          boolean bb = looksLikeObd(safeName(b));
+                          if (aa != bb) return aa ? -1 : 1;
+                          return safeName(a).compareToIgnoreCase(safeName(b));
                       }
-                  }
-
+                  });
+          
                   if (devices.isEmpty()) {
-                      dialog(t("Niciun adaptor gasit", "No adapter found"),
-                              t("Imperecheaza ELM327 din setarile Bluetooth Android, apoi revino.",
-                                      "Pair ELM327 in Android Bluetooth settings, then return."));
+                      dialog(t("Niciun dispozitiv imperecheat", "No paired device"),
+                              t("Imperecheaza ELM327/OBDLink din setarile Bluetooth Android, apoi revino.",
+                                      "Pair the ELM327/OBDLink in Android Bluetooth settings, then return."));
                       return;
                   }
-
+          
                   String[] names = new String[devices.size()];
                   for (int i = 0; i < devices.size(); i++) {
-                      names[i] = safeName(devices.get(i)) + "\n" + devices.get(i).getAddress();
+                      String mark = looksLikeObd(safeName(devices.get(i))) ? "OBD • " : "";
+                      names[i] = mark + safeName(devices.get(i)) + "\n" + devices.get(i).getAddress();
                   }
-
+          
                   new AlertDialog.Builder(this)
                           .setTitle(t("Alege adaptorul", "Choose adapter"))
                           .setItems(names, (d, which) -> {
@@ -500,7 +652,14 @@ jobs:
                               status.setText(t("Selectat: ", "Selected: ") + safeName(selectedDevice));
                           }).show();
               }
-
+          
+              private boolean looksLikeObd(String n) {
+                  String low = n == null ? "" : n.toLowerCase(Locale.ROOT);
+                  return low.contains("elm") || low.contains("obd") || low.contains("vgate")
+                          || low.contains("vlink") || low.contains("obdii")
+                          || low.contains("stn") || low.contains("mx+") || low.contains("obdlink");
+              }
+          
               private void connectSelected() {
                   if (!hasBtPermission()) {
                       requestBtPermission();
@@ -510,10 +669,10 @@ jobs:
                       choosePairedDevice();
                       return;
                   }
-
+          
                   status.setText(t("Conectare...", "Connecting..."));
                   connectButton.setEnabled(false);
-
+          
                   io.execute(() -> {
                       try {
                           closeSocket();
@@ -521,28 +680,25 @@ jobs:
                           socket.connect();
                           input = socket.getInputStream();
                           output = socket.getOutputStream();
-
-                          String atz = elm("ATZ", 2200);
-                          elm("ATE0", 800);
-                          elm("ATL0", 800);
-                          elm("ATS1", 800);
-                          elm("ATH0", 800);
-                          elm("ATSP0", 1000);
-                          String ati = elm("ATI", 900);
+          
+                          initElm();
+          
+                          String ati = elm("ATI", 1000);
                           String volts = elm("ATRV", 900);
                           String proto = elm("ATDP", 900);
-
+          
                           appendLog("ADAPTER: " + clean(ati));
                           appendLog("VOLTAGE: " + clean(volts));
                           appendLog("PROTOCOL: " + clean(proto));
-
+          
                           main.post(() -> {
-                              status.setText(t("Conectat: ", "Connected: ") + safeName(selectedDevice)
-                                      + " • " + clean(volts));
+                              status.setText(t("Conectat: ", "Connected: ")
+                                      + safeName(selectedDevice) + " • " + clean(volts));
                               connectButton.setEnabled(true);
                           });
                       } catch (Exception e) {
-                          appendLog("CONNECT ERROR: " + e.getClass().getSimpleName() + " " + e.getMessage());
+                          appendLog("CONNECT ERROR: "
+                                  + e.getClass().getSimpleName() + " " + e.getMessage());
                           closeSocket();
                           main.post(() -> {
                               status.setText(t("Conectarea a esuat", "Connection failed"));
@@ -551,7 +707,37 @@ jobs:
                       }
                   });
               }
-
+          
+              private void initElm() throws Exception {
+                  elm("ATZ", 2200);
+                  elm("ATE0", 800);
+                  elm("ATL0", 800);
+                  elm("ATS1", 800);
+                  elm("ATH0", 800);
+                  elm("ATSP0", 1100);
+              }
+          
+              private void runAdapterTest() {
+                  if (!requireConnection()) return;
+                  io.execute(() -> {
+                      StringBuilder sb = new StringBuilder();
+                      String[] cmds = {
+                              "ATI", "AT@1", "AT@2", "ATRV", "ATDP", "ATDPN",
+                              "ATH1", "ATH0", "ATAL", "ATCAF1", "ATCFC1", "ATST32"
+                      };
+                      for (String c : cmds) {
+                          try {
+                              sb.append(c).append(" = ").append(clean(elm(c, 900))).append("\n");
+                          } catch (Exception e) {
+                              sb.append(c).append(" = ERROR ").append(e.getMessage()).append("\n");
+                          }
+                      }
+                      try { initElm(); } catch (Exception ignored) {}
+                      appendLog("ADAPTER CAPABILITY TEST\n" + sb);
+                      main.post(() -> vehicleInfo.setText(sb.toString().trim()));
+                  });
+              }
+          
               private void readVehicleInfo() {
                   if (!requireConnection()) return;
                   io.execute(() -> {
@@ -559,14 +745,20 @@ jobs:
                           String vinRaw = elm("0902", 2200);
                           String cal = elm("0904", 1800);
                           String cvn = elm("0906", 1800);
+                          String ecuName = elm("090A", 1800);
                           String volts = elm("ATRV", 900);
                           String proto = elm("ATDP", 900);
+                          String protoNum = elm("ATDPN", 900);
                           String vin = decodeVin(vinRaw);
+          
                           String text = "VIN: " + (vin.isEmpty() ? clean(vinRaw) : vin)
                                   + "\n" + t("Protocol: ", "Protocol: ") + clean(proto)
+                                  + " [" + clean(protoNum) + "]"
                                   + "\n" + t("Tensiune: ", "Voltage: ") + clean(volts)
                                   + "\nCalibration ID: " + clean(cal)
-                                  + "\nCVN: " + clean(cvn);
+                                  + "\nCVN: " + clean(cvn)
+                                  + "\nECU Name: " + clean(ecuName);
+          
                           appendLog("VEHICLE INFO\n" + text);
                           main.post(() -> vehicleInfo.setText(text));
                       } catch (Exception e) {
@@ -574,7 +766,7 @@ jobs:
                       }
                   });
               }
-
+          
               private void toggleLive() {
                   if (!requireConnection()) return;
                   liveRunning = !liveRunning;
@@ -587,36 +779,110 @@ jobs:
                       main.removeCallbacks(liveTick);
                   }
               }
-
-              private void readDtcs() {
+          
+              private void fullObdScan() {
                   if (!requireConnection()) return;
                   dtcButton.setEnabled(false);
+          
                   io.execute(() -> {
+                      StringBuilder report = new StringBuilder();
                       try {
-                          String storedRaw = elm("03", 1800);
-                          String pendingRaw = elm("07", 1800);
-                          String permanentRaw = elm("0A", 1800);
-
+                          String storedRaw = elm("03", 2200);
+                          String pendingRaw = elm("07", 2200);
+                          String permanentRaw = elm("0A", 2200);
+                          String readinessRaw = elm("0101", 1600);
+                          String vinRaw = elm("0902", 2200);
+                          String calRaw = elm("0904", 1800);
+                          String cvnRaw = elm("0906", 1800);
+          
                           List<String> stored = parseDtcs(storedRaw, 0x43);
                           List<String> pending = parseDtcs(pendingRaw, 0x47);
                           List<String> permanent = parseDtcs(permanentRaw, 0x4A);
-
-                          String text = t("STOCATE", "STORED") + ":\n" + listOrNone(stored)
-                                  + "\n\nPENDING:\n" + listOrNone(pending)
-                                  + "\n\n" + t("PERMANENTE", "PERMANENT") + ":\n" + listOrNone(permanent);
-
-                          appendLog("DTC SCAN\n" + text);
+          
+                          report.append(t("STOCATE", "STORED")).append(":\n")
+                                  .append(listWithFamily(stored))
+                                  .append("\n\nPENDING:\n")
+                                  .append(listWithFamily(pending))
+                                  .append("\n\n")
+                                  .append(t("PERMANENTE", "PERMANENT")).append(":\n")
+                                  .append(listWithFamily(permanent))
+                                  .append("\n\nREADINESS RAW:\n").append(clean(readinessRaw))
+                                  .append("\n\nVIN RAW:\n").append(clean(vinRaw))
+                                  .append("\n\nCAL ID RAW:\n").append(clean(calRaw))
+                                  .append("\n\nCVN RAW:\n").append(clean(cvnRaw));
+          
+                          String freeze = readFreezeFrameInternal();
+                          String mode6 = readMode06Internal();
+          
+                          report.append("\n\nFREEZE FRAME:\n").append(freeze)
+                                  .append("\n\nMODE 06:\n").append(mode6);
+          
+                          currentScanText = report.toString();
+                          appendLog("FULL OBD SCAN\n" + currentScanText);
+          
                           main.post(() -> {
-                              dtcBox.setText(text);
+                              dtcBox.setText(currentScanText);
                               dtcButton.setEnabled(true);
                           });
                       } catch (Exception e) {
-                          appendLog("DTC ERROR: " + e.getMessage());
+                          appendLog("FULL OBD SCAN ERROR: " + e.getMessage());
                           main.post(() -> dtcButton.setEnabled(true));
                       }
                   });
               }
-
+          
+              private void readFreezeFrame() {
+                  if (!requireConnection()) return;
+                  io.execute(() -> {
+                      try {
+                          String r = readFreezeFrameInternal();
+                          appendLog("FREEZE FRAME\n" + r);
+                          main.post(() -> dtcBox.setText(r));
+                      } catch (Exception e) {
+                          appendLog("FREEZE FRAME ERROR: " + e.getMessage());
+                      }
+                  });
+              }
+          
+              private String readFreezeFrameInternal() throws Exception {
+                  StringBuilder sb = new StringBuilder();
+                  String[] cmds = {
+                          "020000", "020200", "020400", "020500", "020B00", "020C00",
+                          "020D00", "020F00", "021000", "021100", "023300", "024200",
+                          "024600", "025C00", "025E00"
+                  };
+                  for (String c : cmds) {
+                      String r = elm(c, 1200);
+                      if (isUseful(r)) sb.append(c).append(": ").append(clean(r)).append("\n");
+                  }
+                  if (sb.length() == 0) return t("Fara Freeze Frame disponibil.", "No Freeze Frame available.");
+                  return sb.toString().trim();
+              }
+          
+              private void readMode06() {
+                  if (!requireConnection()) return;
+                  io.execute(() -> {
+                      try {
+                          String r = readMode06Internal();
+                          appendLog("MODE 06\n" + r);
+                          main.post(() -> dtcBox.setText(r));
+                      } catch (Exception e) {
+                          appendLog("MODE 06 ERROR: " + e.getMessage());
+                      }
+                  });
+              }
+          
+              private String readMode06Internal() throws Exception {
+                  StringBuilder sb = new StringBuilder();
+                  String[] cmds = {"0600", "0620", "0640", "0660", "0680", "06A0", "06C0"};
+                  for (String c : cmds) {
+                      String r = elm(c, 1600);
+                      if (isUseful(r)) sb.append(c).append(": ").append(clean(r)).append("\n");
+                  }
+                  if (sb.length() == 0) return t("Mode 06 indisponibil.", "Mode 06 unavailable.");
+                  return sb.toString().trim();
+              }
+          
               private void readReadiness() {
                   if (!requireConnection()) return;
                   io.execute(() -> {
@@ -625,12 +891,14 @@ jobs:
                           int[] data = findPidBytes(raw, 0x41, 0x01, 4);
                           String text;
                           if (data == null) {
-                              text = t("ECU nu a returnat status readiness.", "ECU did not return readiness status.");
+                              text = t("ECU nu a returnat status readiness.",
+                                      "ECU did not return readiness status.");
                           } else {
                               boolean mil = (data[0] & 0x80) != 0;
                               int count = data[0] & 0x7F;
-                              text = t("Check Engine/MIL: ", "Check Engine/MIL: ") + (mil ? "ON" : "OFF")
-                                      + "\n" + t("Numar DTC raportat de ECU: ", "DTC count reported by ECU: ") + count
+                              text = "Check Engine/MIL: " + (mil ? "ON" : "OFF")
+                                      + "\n" + t("Numar DTC raportat de ECU: ",
+                                      "DTC count reported by ECU: ") + count
                                       + "\nRAW: " + clean(raw);
                           }
                           appendLog("READINESS\n" + text);
@@ -641,30 +909,455 @@ jobs:
                       }
                   });
               }
-
+          
+              private void scanSupportedPids() {
+                  if (!requireConnection()) return;
+                  io.execute(() -> {
+                      StringBuilder sb = new StringBuilder();
+                      try {
+                          for (String cmd : Arrays.asList(
+                                  "0100", "0120", "0140", "0160", "0180", "01A0", "01C0")) {
+                              String r = elm(cmd, 1400);
+                              sb.append(cmd).append(": ").append(clean(r)).append("\n");
+                          }
+                          appendLog("SUPPORTED PID MAP\n" + sb);
+                          main.post(() -> vehicleInfo.setText(
+                                  t("Harta PID a fost citita. Vezi Jurnal tehnic.",
+                                          "PID map read. See Technical log.")));
+                      } catch (Exception e) {
+                          appendLog("PID MAP ERROR: " + e.getMessage());
+                      }
+                  });
+              }
+          
+              private void deepUdsScan() {
+                  if (!requireConnection()) return;
+                  deepButton.setEnabled(false);
+          
+                  new AlertDialog.Builder(this)
+                          .setTitle(t("Mercedes Deep Scan", "Mercedes Deep Scan"))
+                          .setMessage(t(
+                                  "Scanarea foloseste numai cereri de citire pe CAN si poate dura cateva minute. Nu face coding si nu actioneaza componente. Continui?",
+                                  "The scan uses read-only CAN requests and may take a few minutes. It does not code modules or actuate components. Continue?"))
+                          .setNegativeButton(t("Anuleaza", "Cancel"), (d, w) -> deepButton.setEnabled(true))
+                          .setPositiveButton(t("Scaneaza", "Scan"), (d, w) -> io.execute(() -> {
+                              try {
+                                  String report = runDeepUdsScanInternal();
+                                  latestUdsReport = report;
+                                  currentScanText = currentScanText + "\n\n" + report;
+                                  appendLog("MERCEDES DEEP SCAN\n" + report);
+                                  main.post(() -> {
+                                      deepBox.setText(report);
+                                      deepButton.setEnabled(true);
+                                  });
+                              } catch (Exception e) {
+                                  appendLog("DEEP SCAN ERROR: " + e.getMessage());
+                                  try { initElm(); } catch (Exception ignored) {}
+                                  main.post(() -> deepButton.setEnabled(true));
+                              }
+                          })).show();
+              }
+          
+              private String runDeepUdsScanInternal() throws Exception {
+                  StringBuilder report = new StringBuilder();
+                  elm("ATSP6", 1300);
+                  elm("ATH1", 800);
+                  elm("ATS1", 800);
+                  elm("ATAL", 800);
+                  elm("ATCAF1", 800);
+                  elm("ATCFC1", 800);
+          
+                  int found = 0;
+          
+                  for (int tx = 0x7E0; tx <= 0x7E7; tx++) {
+                      int rx = tx + 8;
+                      String txs = String.format(Locale.US, "%03X", tx);
+                      String rxs = String.format(Locale.US, "%03X", rx);
+          
+                      setCanHeader(txs, rxs);
+          
+                      String tester = elm("3E00", 700);
+                      String obdProbe = elm("0100", 900);
+          
+                      if (!isUseful(tester) && !isUseful(obdProbe)) {
+                          continue;
+                      }
+          
+                      found++;
+                      report.append("\n=== ECU ").append(txs).append(" -> ").append(rxs).append(" ===\n");
+          
+                      if (isUseful(tester)) report.append("TesterPresent: ").append(clean(tester)).append("\n");
+                      if (isUseful(obdProbe)) report.append("OBD Probe: ").append(clean(obdProbe)).append("\n");
+          
+                      String[] idDids = {
+                              "22F190", "22F187", "22F189", "22F18A", "22F18C"
+                      };
+                      for (String q : idDids) {
+                          String r = elm(q, 1400);
+                          if (isUseful(r)) {
+                              report.append(q).append(": ")
+                                      .append(clean(r)).append(nrcSuffix(r)).append("\n");
+                          }
+                      }
+          
+                      String count = elm("1901FF", 1400);
+                      if (isUseful(count)) {
+                          report.append("DTC Count/Format: ")
+                                  .append(clean(count)).append(nrcSuffix(count)).append("\n");
+                      }
+          
+                      String all = elm("1902FF", 2000);
+                      if (isUseful(all)) {
+                          report.append("DTC by status mask:\n")
+                                  .append(formatUdsDtcResponse(all)).append("\n");
+                      }
+          
+                      String supported = elm("190A", 1800);
+                      if (isUseful(supported)) {
+                          report.append("Supported DTC:\n")
+                                  .append(formatUdsDtcResponse(supported)).append("\n");
+                      }
+          
+                      String firstFailed = elm("190B", 1300);
+                      if (isUseful(firstFailed)) {
+                          report.append("First test failed: ")
+                                  .append(clean(firstFailed)).append(nrcSuffix(firstFailed)).append("\n");
+                      }
+          
+                      String firstConfirmed = elm("190C", 1300);
+                      if (isUseful(firstConfirmed)) {
+                          report.append("First confirmed: ")
+                                  .append(clean(firstConfirmed)).append(nrcSuffix(firstConfirmed)).append("\n");
+                      }
+          
+                      String recentFailed = elm("190D", 1300);
+                      if (isUseful(recentFailed)) {
+                          report.append("Most recent failed: ")
+                                  .append(clean(recentFailed)).append(nrcSuffix(recentFailed)).append("\n");
+                      }
+          
+                      String recentConfirmed = elm("190E", 1300);
+                      if (isUseful(recentConfirmed)) {
+                          report.append("Most recent confirmed: ")
+                                  .append(clean(recentConfirmed)).append(nrcSuffix(recentConfirmed)).append("\n");
+                      }
+          
+                      String mirror = elm("190FFF", 1600);
+                      if (isUseful(mirror)) {
+                          report.append("Mirror memory:\n")
+                                  .append(formatUdsDtcResponse(mirror)).append("\n");
+                      }
+          
+                      String fdc = elm("1914", 1500);
+                      if (isUseful(fdc)) {
+                          report.append("Fault detection counters: ")
+                                  .append(clean(fdc)).append(nrcSuffix(fdc)).append("\n");
+                      }
+          
+                      String permanent = elm("1915", 1500);
+                      if (isUseful(permanent)) {
+                          report.append("Permanent-status DTC:\n")
+                                  .append(formatUdsDtcResponse(permanent)).append("\n");
+                      }
+          
+                      List<String> dtcs = extractUdsDtcs(all);
+                      int limit = Math.min(dtcs.size(), 8);
+                      for (int i = 0; i < limit; i++) {
+                          String dtc = dtcs.get(i);
+          
+                          String sev = elm("1909" + dtc, 1400);
+                          if (isUseful(sev)) {
+                              report.append("Severity ").append(dtc).append(": ")
+                                      .append(clean(sev)).append(nrcSuffix(sev)).append("\n");
+                          }
+          
+                          String snap = elm("1904" + dtc + "FF", 1700);
+                          if (isUseful(snap)) {
+                              report.append("Snapshot ").append(dtc).append(": ")
+                                      .append(clean(snap)).append(nrcSuffix(snap)).append("\n");
+                          }
+          
+                          String ext = elm("1906" + dtc + "FF", 1700);
+                          if (isUseful(ext)) {
+                              report.append("ExtendedData ").append(dtc).append(": ")
+                                      .append(clean(ext)).append(nrcSuffix(ext)).append("\n");
+                          }
+                      }
+                  }
+          
+                  try { initElm(); } catch (Exception e) {
+                      report.append("\nELM re-init warning: ").append(e.getMessage()).append("\n");
+                  }
+          
+                  if (found == 0) {
+                      report.append(t(
+                              "Nu a raspuns niciun ECU pe 7E0-7E7. Asta nu inseamna ca masina nu are erori: unele module W204 folosesc alte adrese/protocoale sau gateway Mercedes.",
+                              "No ECU responded on 7E0-7E7. This does not mean the vehicle has no faults: some W204 modules use different addresses/protocols or the Mercedes gateway."));
+                  } else {
+                      report.insert(0, t("Module CAN detectate: ", "Detected CAN modules: ") + found + "\n");
+                  }
+          
+                  return report.toString().trim();
+              }
+          
+              private void setCanHeader(String tx, String rx) throws Exception {
+                  elm("ATSH" + tx, 700);
+                  String r = elm("ATCRA" + rx, 700);
+                  if (!isUseful(r) && clean(r).contains("?")) {
+                      appendLog("ATCRA not supported by adapter: " + clean(r));
+                  }
+              }
+          
+              private String formatUdsDtcResponse(String raw) {
+                  String nrc = nrcSuffix(raw);
+                  if (!nrc.isEmpty()) return clean(raw) + nrc;
+          
+                  int[] b = hexBytes(raw);
+                  int start = -1;
+                  for (int i = 0; i + 2 < b.length; i++) {
+                      if (b[i] == 0x59 &&
+                              (b[i + 1] == 0x02 || b[i + 1] == 0x0A
+                                      || b[i + 1] == 0x0F || b[i + 1] == 0x15)) {
+                          start = i + 2;
+                          break;
+                      }
+                  }
+                  if (start < 0) return clean(raw);
+          
+                  StringBuilder sb = new StringBuilder();
+                  int idx = start;
+          
+                  if (idx < b.length) {
+                      int availability = b[idx++];
+                      sb.append("StatusAvailabilityMask=0x")
+                              .append(String.format(Locale.US, "%02X", availability)).append("\n");
+                  }
+          
+                  while (idx + 3 < b.length) {
+                      String dtc = String.format(Locale.US, "%02X%02X%02X",
+                              b[idx], b[idx + 1], b[idx + 2]);
+                      int statusByte = b[idx + 3];
+                      sb.append("• UDS ").append(dtc)
+                              .append("  status=0x")
+                              .append(String.format(Locale.US, "%02X", statusByte))
+                              .append("  ").append(decodeDtcStatus(statusByte))
+                              .append("\n");
+                      idx += 4;
+                  }
+          
+                  if (sb.length() == 0) return clean(raw);
+                  return sb.toString().trim();
+              }
+          
+              private List<String> extractUdsDtcs(String raw) {
+                  int[] b = hexBytes(raw);
+                  ArrayList<String> out = new ArrayList<>();
+                  int start = -1;
+                  for (int i = 0; i + 2 < b.length; i++) {
+                      if (b[i] == 0x59 && b[i + 1] == 0x02) {
+                          start = i + 3;
+                          break;
+                      }
+                  }
+                  if (start < 0) return out;
+          
+                  for (int i = start; i + 3 < b.length; i += 4) {
+                      out.add(String.format(Locale.US, "%02X%02X%02X",
+                              b[i], b[i + 1], b[i + 2]));
+                  }
+                  return out;
+              }
+          
+              private String decodeDtcStatus(int s) {
+                  ArrayList<String> f = new ArrayList<>();
+                  if ((s & 0x01) != 0) f.add("testFailed");
+                  if ((s & 0x02) != 0) f.add("failedThisCycle");
+                  if ((s & 0x04) != 0) f.add("pending");
+                  if ((s & 0x08) != 0) f.add("confirmed");
+                  if ((s & 0x10) != 0) f.add("notCompletedSinceClear");
+                  if ((s & 0x20) != 0) f.add("failedSinceClear");
+                  if ((s & 0x40) != 0) f.add("notCompletedThisCycle");
+                  if ((s & 0x80) != 0) f.add("warningRequested");
+                  if (f.isEmpty()) return "no status flags";
+                  return join(f, ", ");
+              }
+          
+              private void passiveCanMonitor() {
+                  if (!requireConnection()) return;
+          
+                  new AlertDialog.Builder(this)
+                          .setTitle(t("Monitor CAN pasiv", "Passive CAN monitor"))
+                          .setMessage(t(
+                                  "BenOBD va asculta traficul CAN aproximativ 5 secunde si nu va transmite comenzi de diagnoza in acest interval.",
+                                  "BenOBD will listen to CAN traffic for about 5 seconds and will not send diagnostic commands during that interval."))
+                          .setNegativeButton(t("Anuleaza", "Cancel"), null)
+                          .setPositiveButton("OK", (d, w) -> io.execute(() -> {
+                              try {
+                                  elm("ATSP6", 1200);
+                                  elm("ATH1", 700);
+                                  elm("ATS1", 700);
+          
+                                  while (input.available() > 0) input.read();
+                                  output.write("ATMA\r".getBytes(StandardCharsets.US_ASCII));
+                                  output.flush();
+          
+                                  long end = System.currentTimeMillis() + 5000;
+                                  StringBuilder sb = new StringBuilder();
+          
+                                  while (System.currentTimeMillis() < end) {
+                                      while (input.available() > 0) {
+                                          int v = input.read();
+                                          if (v < 0) break;
+                                          char c = (char) v;
+                                          if (c != '>') sb.append(c);
+                                          if (sb.length() > 15000) {
+                                              sb.delete(0, sb.length() - 15000);
+                                          }
+                                      }
+                                      Thread.sleep(20);
+                                  }
+          
+                                  output.write("\r".getBytes(StandardCharsets.US_ASCII));
+                                  output.flush();
+                                  Thread.sleep(300);
+          
+                                  appendLog("PASSIVE CAN MONITOR 5s\n" + sb.toString().trim());
+                                  try { initElm(); } catch (Exception ignored) {}
+          
+                                  String view = sb.length() > 6000
+                                          ? sb.substring(sb.length() - 6000)
+                                          : sb.toString();
+          
+                                  main.post(() -> deepBox.setText(view.trim()));
+                              } catch (Exception e) {
+                                  appendLog("CAN MONITOR ERROR: " + e.getMessage());
+                                  try { initElm(); } catch (Exception ignored) {}
+                              }
+                          })).show();
+              }
+          
+              private void expertReadOnlyCommand() {
+                  if (!requireConnection()) return;
+          
+                  String tx = sanitizeHex(expertTx.getText().toString());
+                  String rx = sanitizeHex(expertRx.getText().toString());
+                  String cmd = sanitizeHex(expertCmd.getText().toString());
+          
+                  if (!(tx.length() == 3 || tx.length() == 8)
+                          || !(rx.length() == 3 || rx.length() == 8)
+                          || cmd.length() < 2) {
+                      dialog(t("Date invalide", "Invalid data"),
+                              t("Foloseste CAN ID de 3 sau 8 caractere HEX si o comanda HEX valida.",
+                                      "Use a 3 or 8 character HEX CAN ID and a valid HEX command."));
+                      return;
+                  }
+          
+                  if (!isReadOnlyService(cmd)) {
+                      dialog(t("Comanda blocata", "Command blocked"),
+                              t("Serviciul nu este in lista Read-Only. Coding, SecurityAccess, RoutineControl, IOControl, flashing si CommunicationControl sunt blocate in terminal.",
+                                      "This service is not on the Read-Only allowlist. Coding, SecurityAccess, RoutineControl, IOControl, flashing and CommunicationControl are blocked in the terminal."));
+                      return;
+                  }
+          
+                  io.execute(() -> {
+                      try {
+                          elm("ATSP6", 1200);
+                          elm("ATH1", 700);
+                          elm("ATAL", 700);
+                          elm("ATCAF1", 700);
+          
+                          elm("ATSH" + tx, 700);
+                          elm("ATCRA" + rx, 700);
+          
+                          String r = elm(cmd, 2400);
+                          String formatted = "TX " + tx + " / RX " + rx
+                                  + "\nREQ: " + cmd
+                                  + "\nRES: " + clean(r)
+                                  + nrcSuffix(r);
+          
+                          appendLog("EXPERT READ-ONLY\n" + formatted);
+                          main.post(() -> deepBox.setText(formatted));
+          
+                          try { initElm(); } catch (Exception ignored) {}
+                      } catch (Exception e) {
+                          appendLog("EXPERT READ ERROR: " + e.getMessage());
+                          try { initElm(); } catch (Exception ignored) {}
+                      }
+                  });
+              }
+          
+              private boolean isReadOnlyService(String cmd) {
+                  if (cmd.length() < 2) return false;
+                  String svc = cmd.substring(0, 2);
+                  return Arrays.asList(
+                          "01", "02", "03", "06", "07", "09", "0A",
+                          "18", "19", "1A", "21", "22", "3E"
+                  ).contains(svc);
+              }
+          
+              private void confirmUdsClear() {
+                  if (!requireConnection()) return;
+          
+                  String tx = sanitizeHex(expertTx.getText().toString());
+                  String rx = sanitizeHex(expertRx.getText().toString());
+          
+                  new AlertDialog.Builder(this)
+                          .setTitle(t("Stergere memorie DTC UDS", "Clear UDS DTC memory"))
+                          .setMessage(t(
+                                  "Aceasta trimite 14FFFFFF catre modulul selectat si poate sterge istoricul de diagnoza din acel modul. Nu modifica coding-ul, dar poate elimina informatii utile pentru diagnostic. Continui?",
+                                  "This sends 14FFFFFF to the selected module and may erase diagnostic history in that module. It does not change coding, but can remove useful diagnostic evidence. Continue?"))
+                          .setNegativeButton(t("Anuleaza", "Cancel"), null)
+                          .setPositiveButton(t("Sterge", "Clear"), (d, w) -> io.execute(() -> {
+                              try {
+                                  elm("ATSP6", 1200);
+                                  elm("ATH1", 700);
+                                  elm("ATAL", 700);
+                                  elm("ATCAF1", 700);
+                                  elm("ATSH" + tx, 700);
+                                  elm("ATCRA" + rx, 700);
+          
+                                  String r = elm("14FFFFFF", 2200);
+                                  appendLog("UDS CLEAR " + tx + "/" + rx + ": " + clean(r) + nrcSuffix(r));
+                                  String text = t("Raspuns stergere UDS: ", "UDS clear response: ")
+                                          + clean(r) + nrcSuffix(r);
+          
+                                  main.post(() -> deepBox.setText(text));
+                                  try { initElm(); } catch (Exception ignored) {}
+                              } catch (Exception e) {
+                                  appendLog("UDS CLEAR ERROR: " + e.getMessage());
+                                  try { initElm(); } catch (Exception ignored) {}
+                              }
+                          })).show();
+              }
+          
               private void confirmClear() {
                   if (!requireConnection()) return;
+          
                   new AlertDialog.Builder(this)
                           .setTitle(t("Stergere erori OBD", "Clear OBD trouble codes"))
                           .setMessage(t(
-                                  "Comanda OBD Mode 04 sterge erorile de emisii si poate reseta freeze-frame/readiness. Motorul trebuie sa fie oprit, contactul pus. Continui?",
-                                  "OBD Mode 04 clears emissions DTCs and may reset freeze-frame/readiness. Engine should be off, ignition on. Continue?"
-                          ))
+                                  "Comanda OBD Mode 04 sterge erorile de emisii si poate reseta Freeze Frame/readiness. Motorul trebuie sa fie oprit, contactul pus. Continui?",
+                                  "OBD Mode 04 clears emissions DTCs and may reset Freeze Frame/readiness. Engine should be off, ignition on. Continue?"))
                           .setNegativeButton(t("Anuleaza", "Cancel"), null)
                           .setPositiveButton(t("Sterge", "Clear"), (d, w) -> clearDtcs())
                           .show();
               }
-
+          
               private void clearDtcs() {
                   clearButton.setEnabled(false);
                   io.execute(() -> {
                       try {
                           String response = elm("04", 1800);
                           appendLog("CLEAR DTC RESPONSE: " + clean(response));
+          
                           String verify = elm("03", 1800);
                           List<String> remain = parseDtcs(verify, 0x43);
-                          String text = t("Raspuns stergere: ", "Clear response: ") + clean(response)
-                                  + "\n\n" + t("Erori ramase: ", "Remaining codes: ") + listOrNone(remain);
+          
+                          String text = t("Raspuns stergere: ", "Clear response: ")
+                                  + clean(response)
+                                  + "\n\n" + t("Erori ramase: ", "Remaining codes: ")
+                                  + listWithFamily(remain);
+          
                           main.post(() -> {
                               dtcBox.setText(text);
                               clearButton.setEnabled(true);
@@ -675,76 +1368,147 @@ jobs:
                       }
                   });
               }
-
-              private void scanSupportedPids() {
-                  if (!requireConnection()) return;
-                  io.execute(() -> {
-                      StringBuilder sb = new StringBuilder();
-                      try {
-                          for (String cmd : Arrays.asList("0100", "0120", "0140", "0160", "0180", "01A0", "01C0")) {
-                              String r = elm(cmd, 1400);
-                              sb.append(cmd).append(": ").append(clean(r)).append("\n");
-                          }
-                          appendLog("SUPPORTED PID MAP\n" + sb);
-                          main.post(() -> vehicleInfo.setText(t("Harta PID a fost citita. Vezi Jurnal tehnic.",
-                                  "PID map read. See Technical log.")));
-                      } catch (Exception e) {
-                          appendLog("PID MAP ERROR: " + e.getMessage());
-                      }
-                  });
+          
+              private void saveSnapshot() {
+                  String snapshot = currentScanText;
+                  if (snapshot == null || snapshot.trim().isEmpty()) {
+                      snapshot = dtcBox == null ? "" : dtcBox.getText().toString();
+                  }
+                  prefs.edit()
+                          .putString("previous_scan", snapshot)
+                          .putLong("previous_scan_time", System.currentTimeMillis())
+                          .apply();
+                  toast(t("Scanarea a fost salvata.", "Scan snapshot saved."));
               }
-
+          
+              private void compareWithPrevious() {
+                  String prev = prefs.getString("previous_scan", "");
+                  String cur = currentScanText == null ? "" : currentScanText;
+          
+                  if (prev.trim().isEmpty()) {
+                      dialog(t("Fara istoric", "No history"),
+                              t("Salveaza mai intai o scanare.", "Save a scan snapshot first."));
+                      return;
+                  }
+          
+                  Set<String> oldCodes = extractAllCodes(prev);
+                  Set<String> newCodes = extractAllCodes(cur);
+          
+                  Set<String> appeared = new HashSet<>(newCodes);
+                  appeared.removeAll(oldCodes);
+          
+                  Set<String> gone = new HashSet<>(oldCodes);
+                  gone.removeAll(newCodes);
+          
+                  Set<String> same = new HashSet<>(newCodes);
+                  same.retainAll(oldCodes);
+          
+                  String text = t("ERORI NOI", "NEW FAULTS") + ":\n" + setOrNone(appeared)
+                          + "\n\n" + t("DISPARUTE", "CLEARED/GONE") + ":\n" + setOrNone(gone)
+                          + "\n\n" + t("RAMASE", "STILL PRESENT") + ":\n" + setOrNone(same);
+          
+                  deepBox.setText(text);
+              }
+          
+              private Set<String> extractAllCodes(String s) {
+                  HashSet<String> out = new HashSet<>();
+                  if (s == null) return out;
+          
+                  Matcher m1 = Pattern.compile("\\b[PCBU][0-3][0-9A-F]{3}\\b",
+                          Pattern.CASE_INSENSITIVE).matcher(s);
+                  while (m1.find()) out.add(m1.group().toUpperCase(Locale.ROOT));
+          
+                  Matcher m2 = Pattern.compile("\\bUDS\\s+([0-9A-F]{6})\\b",
+                          Pattern.CASE_INSENSITIVE).matcher(s);
+                  while (m2.find()) out.add("UDS " + m2.group(1).toUpperCase(Locale.ROOT));
+          
+                  return out;
+              }
+          
+              private String setOrNone(Set<String> s) {
+                  if (s.isEmpty()) return t("Niciuna", "None");
+                  ArrayList<String> sorted = new ArrayList<>(s);
+                  Collections.sort(sorted);
+                  StringBuilder sb = new StringBuilder();
+                  for (String x : sorted) sb.append("• ").append(x).append("\n");
+                  return sb.toString().trim();
+              }
+          
               private void addCodingSwitch(String key, String name) {
                   Switch s = makeSwitch(name,
                           t("Activare Mercedes specifica. Necesita profil verificat pentru modulul detectat.",
                                   "Mercedes-specific activation. Requires a verified profile for the detected module."));
+          
                   s.setOnCheckedChangeListener((buttonView, checked) -> {
                       if (!buttonView.isPressed()) return;
                       buttonView.setChecked(!checked);
+          
                       if (!requireConnection()) return;
+          
                       if (!forceMode) {
-                          dialog(t("Safe Mode", "Safe Mode"),
-                                  t("Activeaza Force Mode pentru codari de confort.", "Enable Force Mode for comfort coding."));
+                          dialog("Safe Mode",
+                                  t("Activeaza Force Mode pentru codari de confort.",
+                                          "Enable Force Mode for comfort coding."));
                           return;
                       }
+          
                       dialog(t("Profil Mercedes necesar", "Mercedes profile required"),
-                              t("BenOBD nu va inventa payload-uri de codare. Pentru " + name
-                                              + " trebuie identificat modulul W204 si incarcata o secventa verificata. "
-                                              + "Diagnoza, Live Data si stergerea DTC sunt functionale acum.",
-                                      "BenOBD will not invent coding payloads. For " + name
-                                              + " the W204 module must be identified and a verified sequence loaded. "
-                                              + "Diagnostics, Live Data and DTC clearing are functional now."));
+                              t("BenOBD nu inventeaza payload-uri de coding. Pentru " + name
+                                              + " trebuie identificat modulul si incarcata o secventa Mercedes verificata. "
+                                              + "Diagnoza Deep Scan ramane complet Read-Only.",
+                                      "BenOBD does not invent coding payloads. For " + name
+                                              + " the module must be identified and a verified Mercedes sequence loaded. "
+                                              + "Deep Scan remains fully Read-Only."));
                   });
+          
                   root.addView(s, smallGap());
               }
-
+          
               private String pid(String pid, int bytes, String type) throws Exception {
                   String raw = elm("01" + pid, 1100);
                   int[] d = findPidBytes(raw, 0x41, Integer.parseInt(pid, 16), bytes);
                   if (d == null) return "--";
-
+          
                   switch (type) {
                       case "rpm":
-                          return String.format(Locale.US, "%.0f rpm", ((d[0] * 256) + d[1]) / 4.0);
+                          return String.format(Locale.US, "%.0f rpm",
+                                  ((d[0] * 256) + d[1]) / 4.0);
                       case "speed":
                           return d[0] + " km/h";
                       case "temp":
                           return (d[0] - 40) + " °C";
                       case "percent":
-                          return String.format(Locale.US, "%.0f %%", d[0] * 100.0 / 255.0);
+                          return String.format(Locale.US, "%.0f %%",
+                                  d[0] * 100.0 / 255.0);
                       case "maf":
-                          return String.format(Locale.US, "%.2f g/s", ((d[0] * 256) + d[1]) / 100.0);
+                          return String.format(Locale.US, "%.2f g/s",
+                                  ((d[0] * 256) + d[1]) / 100.0);
                       case "map":
                           return d[0] + " kPa";
                       case "timing":
-                          return String.format(Locale.US, "%.1f °", d[0] / 2.0 - 64.0);
+                          return String.format(Locale.US, "%.1f °",
+                                  d[0] / 2.0 - 64.0);
                       case "voltage":
-                          return String.format(Locale.US, "%.2f V", ((d[0] * 256) + d[1]) / 1000.0);
+                          return String.format(Locale.US, "%.2f V",
+                                  ((d[0] * 256) + d[1]) / 1000.0);
+                      case "seconds": {
+                          int sec = d[0] * 256 + d[1];
+                          int h = sec / 3600;
+                          int m = (sec % 3600) / 60;
+                          return h + "h " + m + "m";
+                      }
+                      case "fuelrate":
+                          return String.format(Locale.US, "%.2f L/h",
+                                  ((d[0] * 256) + d[1]) * 0.05);
+                      case "distance":
+                          return (d[0] * 256 + d[1]) + " km";
+                      case "obdstd":
+                          return "0x" + String.format(Locale.US, "%02X", d[0]);
                       default:
                           return "--";
                   }
               }
-
+          
               private int[] findPidBytes(String raw, int mode, int pid, int count) {
                   int[] bytes = hexBytes(raw);
                   for (int i = 0; i < bytes.length - (count + 1); i++) {
@@ -756,11 +1520,12 @@ jobs:
                   }
                   return null;
               }
-
+          
               private List<String> parseDtcs(String raw, int responseMode) {
                   int[] b = hexBytes(raw);
                   List<String> out = new ArrayList<>();
                   int start = -1;
+          
                   for (int i = 0; i < b.length; i++) {
                       if (b[i] == responseMode) {
                           start = i + 1;
@@ -768,54 +1533,87 @@ jobs:
                       }
                   }
                   if (start < 0) return out;
+          
                   for (int i = start; i + 1 < b.length; i += 2) {
                       int a = b[i], c = b[i + 1];
                       if (a == 0 && c == 0) continue;
+          
                       char system = "PCBU".charAt((a >> 6) & 0x03);
                       int digit1 = (a >> 4) & 0x03;
                       int digit2 = a & 0x0F;
                       int digit3 = (c >> 4) & 0x0F;
                       int digit4 = c & 0x0F;
-                      out.add("" + system + digit1 + hex1(digit2) + hex1(digit3) + hex1(digit4));
+          
+                      out.add("" + system + digit1
+                              + hex1(digit2) + hex1(digit3) + hex1(digit4));
                   }
                   return out;
               }
-
+          
               private char hex1(int v) {
                   return "0123456789ABCDEF".charAt(v & 0x0F);
               }
-
-              private String listOrNone(List<String> l) {
+          
+              private String listWithFamily(List<String> l) {
                   if (l.isEmpty()) return t("Niciuna / NO DATA", "None / NO DATA");
                   StringBuilder sb = new StringBuilder();
-                  for (String s : l) sb.append("• ").append(s).append("\n");
+                  for (String s : l) {
+                      sb.append("• ").append(s).append(" — ")
+                              .append(dtcFamily(s)).append("\n");
+                  }
                   return sb.toString().trim();
               }
-
+          
+              private String dtcFamily(String code) {
+                  if (code == null || code.length() < 1) return "";
+                  switch (Character.toUpperCase(code.charAt(0))) {
+                      case 'P': return t("Powertrain / motor-transmisie", "Powertrain");
+                      case 'B': return t("Body / caroserie-confort", "Body");
+                      case 'C': return t("Chassis / sasiu", "Chassis");
+                      case 'U': return t("Network / comunicatie", "Network");
+                      default: return "";
+                  }
+              }
+          
               private int[] hexBytes(String raw) {
                   if (raw == null) return new int[0];
+          
                   String normalized = raw.toUpperCase(Locale.ROOT)
-                          .replaceAll("SEARCHING\\.\\.\\.", " ")
-                          .replaceAll("BUS INIT:.*", " ")
+                          .replace("SEARCHING...", " ")
+                          .replace("\r", " ")
+                          .replace("\n", " ")
                           .replaceAll("[^0-9A-F]", " ");
+          
                   String[] tokens = normalized.trim().split("\\s+");
                   ArrayList<Integer> vals = new ArrayList<>();
+          
                   for (String token : tokens) {
                       if (token.length() == 2) {
-                          try { vals.add(Integer.parseInt(token, 16)); } catch (Exception ignored) {}
+                          try {
+                              vals.add(Integer.parseInt(token, 16));
+                          } catch (Exception ignored) {}
+                      } else if (token.length() > 2 && token.length() % 2 == 0) {
+                          for (int i = 0; i < token.length(); i += 2) {
+                              try {
+                                  vals.add(Integer.parseInt(token.substring(i, i + 2), 16));
+                              } catch (Exception ignored) {}
+                          }
                       }
                   }
+          
                   int[] r = new int[vals.size()];
                   for (int i = 0; i < vals.size(); i++) r[i] = vals.get(i);
                   return r;
               }
-
+          
               private String decodeVin(String raw) {
                   int[] b = hexBytes(raw);
                   StringBuilder vin = new StringBuilder();
                   boolean after = false;
+          
                   for (int i = 0; i < b.length; i++) {
-                      if (!after && b[i] == 0x49 && i + 2 < b.length && b[i + 1] == 0x02) {
+                      if (!after && b[i] == 0x49
+                              && i + 2 < b.length && b[i + 1] == 0x02) {
                           after = true;
                           i += 2;
                           continue;
@@ -825,25 +1623,66 @@ jobs:
                           if (v >= 0x20 && v <= 0x7E) vin.append((char) v);
                       }
                   }
+          
                   String s = vin.toString().replaceAll("[^A-HJ-NPR-Z0-9]", "");
                   if (s.length() >= 17) return s.substring(0, 17);
                   return s;
               }
-
+          
+              private String nrcSuffix(String raw) {
+                  int[] b = hexBytes(raw);
+                  for (int i = 0; i + 2 < b.length; i++) {
+                      if (b[i] == 0x7F) {
+                          int service = b[i + 1];
+                          int nrc = b[i + 2];
+                          return "  [NRC 0x"
+                                  + String.format(Locale.US, "%02X", nrc)
+                                  + " " + nrcName(nrc)
+                                  + ", service 0x"
+                                  + String.format(Locale.US, "%02X", service) + "]";
+                      }
+                  }
+                  return "";
+              }
+          
+              private String nrcName(int nrc) {
+                  switch (nrc) {
+                      case 0x10: return "generalReject";
+                      case 0x11: return "serviceNotSupported";
+                      case 0x12: return "subFunctionNotSupported";
+                      case 0x13: return "incorrectLengthOrFormat";
+                      case 0x21: return "busyRepeatRequest";
+                      case 0x22: return "conditionsNotCorrect";
+                      case 0x24: return "requestSequenceError";
+                      case 0x31: return "requestOutOfRange";
+                      case 0x33: return "securityAccessDenied";
+                      case 0x35: return "invalidKey";
+                      case 0x36: return "exceedNumberOfAttempts";
+                      case 0x37: return "requiredTimeDelayNotExpired";
+                      case 0x78: return "responsePending";
+                      default: return "negativeResponse";
+                  }
+              }
+          
               private String elm(String command, long waitMs) throws Exception {
-                  if (output == null || input == null) throw new IllegalStateException("No ELM327 socket");
+                  if (output == null || input == null) {
+                      throw new IllegalStateException("No ELM327 socket");
+                  }
+          
                   while (input.available() > 0) input.read();
-
-                  output.write((command + "\r").getBytes(StandardCharsets.US_ASCII));
+          
+                  output.write((command + "\r")
+                          .getBytes(StandardCharsets.US_ASCII));
                   output.flush();
-
+          
                   long end = System.currentTimeMillis() + waitMs;
                   StringBuilder sb = new StringBuilder();
-
+          
                   while (System.currentTimeMillis() < end) {
                       while (input.available() > 0) {
                           int v = input.read();
                           if (v < 0) break;
+          
                           char c = (char) v;
                           if (c == '>') {
                               String r = sb.toString().trim();
@@ -854,94 +1693,145 @@ jobs:
                       }
                       Thread.sleep(20);
                   }
-
+          
                   String r = sb.toString().trim();
                   appendLog("> " + command + "\n" + clean(r) + " [timeout]");
                   return r;
               }
-
+          
+              private boolean isUseful(String s) {
+                  if (s == null) return false;
+                  String x = clean(s).toUpperCase(Locale.ROOT);
+                  return !(x.isEmpty()
+                          || x.equals("?")
+                          || x.contains("NO DATA")
+                          || x.contains("UNABLE TO CONNECT")
+                          || x.contains("STOPPED"));
+              }
+          
+              private String sanitizeHex(String s) {
+                  if (s == null) return "";
+                  return s.toUpperCase(Locale.ROOT).replaceAll("[^0-9A-F]", "");
+              }
+          
               private void appendLog(String text) {
                   main.post(() -> {
                       if (log == null) return;
+          
                       String old = log.getText().toString();
                       String next = old + "\n\n" + text;
-                      if (next.length() > 18000) next = next.substring(next.length() - 18000);
+          
+                      if (next.length() > 40000) {
+                          next = next.substring(next.length() - 40000);
+                      }
                       log.setText(next);
                   });
               }
-
+          
               private boolean requireConnection() {
                   if (isConnected()) return true;
-                  dialog(t("ELM327 neconectat", "ELM327 disconnected"),
-                          t("Alege adaptorul si conecteaza-l mai intai.", "Choose and connect the adapter first."));
+          
+                  dialog(t("Adaptor neconectat", "Adapter disconnected"),
+                          t("Alege adaptorul si conecteaza-l mai intai.",
+                                  "Choose and connect the adapter first."));
                   return false;
               }
-
+          
               private boolean isConnected() {
-                  return socket != null && socket.isConnected() && input != null && output != null;
+                  return socket != null
+                          && socket.isConnected()
+                          && input != null
+                          && output != null;
               }
-
+          
               private void closeSocket() {
                   liveRunning = false;
                   main.removeCallbacks(liveTick);
+          
                   try { if (input != null) input.close(); } catch (Exception ignored) {}
                   try { if (output != null) output.close(); } catch (Exception ignored) {}
                   try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+          
                   input = null;
                   output = null;
                   socket = null;
               }
-
-              @Override protected void onDestroy() {
+          
+              @Override
+              protected void onDestroy() {
                   closeSocket();
                   io.shutdownNow();
                   super.onDestroy();
               }
-
+          
               private boolean hasBtPermission() {
                   return Build.VERSION.SDK_INT < 31
-                          || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+                          || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
+                          == PackageManager.PERMISSION_GRANTED;
               }
-
+          
               private void requestBtPermission() {
                   if (Build.VERSION.SDK_INT >= 31 && !hasBtPermission()) {
-                      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 77);
+                      requestPermissions(
+                              new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 77);
                   }
               }
-
+          
               private String safeName(BluetoothDevice d) {
-                  if (d == null) return "ELM327";
+                  if (d == null) return "OBD";
+          
                   try {
                       String n = d.getName();
-                      return n == null || n.trim().isEmpty() ? "ELM327" : n;
+                      return n == null || n.trim().isEmpty() ? "Bluetooth device" : n;
                   } catch (SecurityException e) {
-                      return "ELM327";
+                      return "Bluetooth device";
                   }
               }
-
+          
               private String clean(String s) {
                   if (s == null) return "";
-                  return s.replace("\r", " ").replace("\n", " ").replaceAll("\\s+", " ").trim();
+                  return s.replace("\r", " ")
+                          .replace("\n", " ")
+                          .replaceAll("\\s+", " ")
+                          .trim();
               }
-
-              private String t(String ro, String en) { return english ? en : ro; }
-
-              private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
-
+          
+              private String join(List<String> items, String sep) {
+                  StringBuilder sb = new StringBuilder();
+                  for (int i = 0; i < items.size(); i++) {
+                      if (i > 0) sb.append(sep);
+                      sb.append(items.get(i));
+                  }
+                  return sb.toString();
+              }
+          
+              private String t(String ro, String en) {
+                  return english ? en : ro;
+              }
+          
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+              }
+          
               private void dialog(String title, String msg) {
-                  new AlertDialog.Builder(this).setTitle(title).setMessage(msg).setPositiveButton("OK", null).show();
+                  new AlertDialog.Builder(this)
+                          .setTitle(title)
+                          .setMessage(msg)
+                          .setPositiveButton("OK", null)
+                          .show();
               }
-
+          
               private TextView label(String text, int size, int color, boolean bold) {
                   TextView v = new TextView(this);
                   v.setText(text);
                   v.setTextSize(size);
                   v.setTextColor(color);
-                  v.setTypeface(Typeface.create("sans-serif-light", bold ? Typeface.BOLD : Typeface.NORMAL));
+                  v.setTypeface(Typeface.create("sans-serif-light",
+                          bold ? Typeface.BOLD : Typeface.NORMAL));
                   v.setGravity(Gravity.CENTER_VERTICAL);
                   return v;
               }
-
+          
               private TextView monoBox(String text) {
                   TextView v = label(text, 12, Color.rgb(201, 209, 213), false);
                   v.setTypeface(Typeface.MONOSPACE);
@@ -950,7 +1840,7 @@ jobs:
                   v.setTextIsSelectable(true);
                   return v;
               }
-
+          
               private Button button(String text) {
                   Button b = new Button(this);
                   b.setText(text);
@@ -961,13 +1851,13 @@ jobs:
                   b.setBackground(roundRect(ACCENT, ACCENT, 0, 13));
                   return b;
               }
-
+          
               private Button compactButton(String text) {
                   Button b = button(text);
                   b.setTextSize(13);
                   return b;
               }
-
+          
               private Button secondaryButton(String text) {
                   Button b = new Button(this);
                   b.setText(text);
@@ -978,14 +1868,16 @@ jobs:
                   b.setBackground(roundRect(CARD2, Color.rgb(66, 73, 78), 1, 13));
                   return b;
               }
-
+          
               private Button dangerButton(String text) {
                   Button b = secondaryButton(text);
                   b.setTextColor(Color.rgb(255, 205, 205));
-                  b.setBackground(roundRect(Color.rgb(45, 20, 22), Color.rgb(116, 55, 58), 1, 13));
+                  b.setBackground(roundRect(
+                          Color.rgb(45, 20, 22),
+                          Color.rgb(116, 55, 58), 1, 13));
                   return b;
               }
-
+          
               private Switch makeSwitch(String title, String description) {
                   Switch s = new Switch(this);
                   s.setText(title + "\n" + description);
@@ -997,7 +1889,7 @@ jobs:
                   s.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
                   return s;
               }
-
+          
               private LinearLayout cardHorizontal() {
                   LinearLayout l = new LinearLayout(this);
                   l.setOrientation(LinearLayout.HORIZONTAL);
@@ -1006,33 +1898,37 @@ jobs:
                   l.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 16));
                   return l;
               }
-
-              private GradientDrawable roundRect(int fill, int stroke, int width, int radius) {
+          
+              private GradientDrawable roundRect(
+                      int fill, int stroke, int width, int radius) {
                   GradientDrawable d = new GradientDrawable();
                   d.setColor(fill);
                   d.setCornerRadius(dp(radius));
                   if (width > 0) d.setStroke(dp(width), stroke);
                   return d;
               }
-
+          
               private LinearLayout.LayoutParams params() {
-                  return new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                  return new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT);
               }
-
+          
               private LinearLayout.LayoutParams section() {
                   LinearLayout.LayoutParams p = params();
                   p.topMargin = dp(10);
                   return p;
               }
-
+          
               private LinearLayout.LayoutParams smallGap() {
                   LinearLayout.LayoutParams p = params();
                   p.topMargin = dp(7);
                   return p;
               }
-
+          
               private int dp(int value) {
-                  return Math.round(value * getResources().getDisplayMetrics().density);
+                  return Math.round(value
+                          * getResources().getDisplayMetrics().density);
               }
           }
           EOF
@@ -1047,11 +1943,11 @@ jobs:
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v3.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v4.apk
 
-      - name: Upload BenOBD v3 APK
+      - name: Upload BenOBD v4 APK
         uses: actions/upload-artifact@v4
         with:
-          name: BenOBD-v3-APK
-          path: BenOBD-v3.apk
+          name: BenOBD-v4-APK
+          path: BenOBD-v4.apk
           retention-days: 30
