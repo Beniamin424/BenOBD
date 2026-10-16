@@ -1,1 +1,663 @@
+name: Build BenOBD APK
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Android platform
+        shell: bash
+        run: |
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Create BenOBD Android project
+        shell: bash
+        run: |
+          mkdir -p app/src/main/java/ro/benobd/app
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "BenOBD"
+          include(":app")
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > app/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'ro.benobd.app'
+              compileSdk 35
+
+              defaultConfig {
+                  applicationId "ro.benobd.app"
+                  minSdk 26
+                  targetSdk 35
+                  versionCode 3
+                  versionName "2.0.0"
+              }
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="BenOBD"
+                  android:supportsRtl="true"
+                  android:theme="@style/AppTheme">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:statusBarColor">#090B0D</item>
+                  <item name="android:navigationBarColor">#090B0D</item>
+                  <item name="android:colorAccent">#33E77A</item>
+                  <item name="android:windowBackground">#090B0D</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#090B0D" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#1A1F23" android:strokeColor="#33E77A" android:strokeWidth="2"
+                  android:pathData="M18,60 C20,43 31,34 54,32 C77,34 88,43 90,60 L92,70 L86,76 H22 L16,70 Z"/>
+              <path android:fillColor="#0D1114" android:strokeColor="#E8EEF2" android:strokeWidth="2"
+                  android:pathData="M31,45 Q54,36 77,45 L83,58 H25 Z"/>
+              <path android:fillColor="#33E77A"
+                  android:pathData="M24,60 Q32,56 40,60 L38,66 H24 Z M68,60 Q76,56 84,60 L84,66 H70 Z"/>
+              <path android:fillColor="#CED7DC" android:pathData="M43,57h22v3h-22z M43,63h22v3h-22z M43,69h22v3h-22z"/>
+              <path android:fillColor="#33E77A" android:pathData="M52,49h4v22h-4z M43,58h22v4h-22z"/>
+          </vector>
+          EOF
+
+          cat > app/src/main/java/ro/benobd/app/MainActivity.java <<'EOF'
+          package ro.benobd.app;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.bluetooth.BluetoothAdapter;
+          import android.bluetooth.BluetoothDevice;
+          import android.bluetooth.BluetoothSocket;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.CompoundButton;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.Switch;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayList;
+          import java.util.List;
+          import java.util.Locale;
+          import java.util.Set;
+          import java.util.UUID;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
+
+          public class MainActivity extends Activity {
+              private static final int GREEN = Color.rgb(51, 231, 122);
+              private static final int BG = Color.rgb(9, 11, 13);
+              private static final int CARD = Color.rgb(18, 22, 25);
+              private static final int TEXT = Color.rgb(236, 242, 245);
+              private static final int MUTED = Color.rgb(151, 164, 172);
+              private static final UUID SPP = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
+
+              private final ExecutorService io = Executors.newSingleThreadExecutor();
+              private final Handler main = new Handler(Looper.getMainLooper());
+
+              private BluetoothAdapter adapter;
+              private BluetoothDevice selectedDevice;
+              private BluetoothSocket socket;
+              private InputStream input;
+              private OutputStream output;
+
+              private TextView status;
+              private TextView log;
+              private Button connectButton;
+              private Button readButton;
+              private LinearLayout root;
+
+              private boolean english;
+              private boolean forceMode;
+              private SharedPreferences prefs;
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  prefs = getSharedPreferences("benobd", MODE_PRIVATE);
+                  english = prefs.getBoolean("english", false);
+                  adapter = BluetoothAdapter.getDefaultAdapter();
+                  requestBtPermission();
+                  drawUi();
+              }
+
+              private void drawUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+                  scroll.setBackgroundColor(BG);
+
+                  root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(18), dp(18), dp(18), dp(40));
+                  scroll.addView(root, new ScrollView.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  TextView title = label("BenOBD", 31, TEXT, true);
+                  root.addView(title);
+
+                  TextView sub = label(t("Mercedes W204 • ELM327 • Coding & Diagnostics",
+                          "Mercedes W204 • ELM327 • Coding & Diagnostics"), 14, GREEN, false);
+                  LinearLayout.LayoutParams sp = params();
+                  sp.bottomMargin = dp(20);
+                  root.addView(sub, sp);
+
+                  LinearLayout lang = card();
+                  TextView langText = label(t("Limba", "Language"), 16, TEXT, true);
+                  lang.addView(langText, new LinearLayout.LayoutParams(0, dp(48), 1));
+                  Button langBtn = button(english ? "EN" : "RO");
+                  langBtn.setOnClickListener(v -> {
+                      english = !english;
+                      prefs.edit().putBoolean("english", english).apply();
+                      recreate();
+                  });
+                  lang.addView(langBtn, new LinearLayout.LayoutParams(dp(78), dp(48)));
+                  root.addView(lang, section());
+
+                  status = label(t("Neconectat", "Disconnected"), 15, MUTED, false);
+                  root.addView(status, smallGap());
+
+                  Button choose = button(t("Alege ELM327 imperecheat", "Choose paired ELM327"));
+                  choose.setOnClickListener(v -> choosePairedDevice());
+                  root.addView(choose, section());
+
+                  connectButton = button(t("Conecteaza ELM327", "Connect ELM327"));
+                  connectButton.setOnClickListener(v -> connectSelected());
+                  root.addView(connectButton, section());
+
+                  readButton = button(t("Citeste masina", "Read vehicle"));
+                  readButton.setEnabled(false);
+                  readButton.setOnClickListener(v -> readVehicle());
+                  root.addView(readButton, section());
+
+                  TextView codingTitle = label(t("Codari / Activari", "Coding / Activations"), 21, TEXT, true);
+                  root.addView(codingTitle, titleGap());
+
+                  Switch force = makeSwitch(t("Force Mode experimental", "Experimental Force Mode"),
+                          t("Permite incercarea doar pentru profile verificate. Sistemele critice raman blocate.",
+                                  "Allows attempts only for verified profiles. Critical systems remain blocked."));
+                  force.setChecked(false);
+                  force.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                      forceMode = isChecked;
+                      toast(isChecked
+                              ? t("Force Mode activ. Nu se trimit valori universale.", "Force Mode enabled. No universal values are sent.")
+                              : t("Safe Mode activ.", "Safe Mode enabled."));
+                  });
+                  root.addView(force, section());
+
+                  addCodingSwitch("needle", t("Needle Sweep", "Needle Sweep"));
+                  addCodingSwitch("amg", t("AMG Menu / Display", "AMG Menu / Display"));
+                  addCodingSwitch("mirrors", t("Oglinzi la incuiere", "Fold mirrors on lock"));
+                  addCodingSwitch("drl", "DRL");
+                  addCodingSwitch("coming", t("Coming Home / Welcome Lights", "Coming Home / Welcome Lights"));
+                  addCodingSwitch("autolock", t("Auto Lock", "Auto Lock"));
+                  addCodingSwitch("speed", t("Viteza digitala", "Digital speed"));
+
+                  TextView diagTitle = label(t("Jurnal OBD", "OBD log"), 21, TEXT, true);
+                  root.addView(diagTitle, titleGap());
+
+                  log = label(t("Astept conexiunea ELM327...", "Waiting for ELM327 connection..."),
+                          13, Color.rgb(190, 200, 205), false);
+                  log.setTypeface(Typeface.MONOSPACE);
+                  log.setPadding(dp(14), dp(14), dp(14), dp(14));
+                  log.setBackground(roundRect(Color.rgb(12, 15, 17), Color.rgb(44, 51, 55), 1));
+                  root.addView(log, section());
+
+                  TextView warning = label(
+                          t("ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor si TCU sunt excluse din Force Mode.",
+                                  "ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU and TCU are excluded from Force Mode."),
+                          12, GREEN, false);
+                  root.addView(warning, section());
+
+                  setContentView(scroll);
+              }
+
+              private void addCodingSwitch(String key, String name) {
+                  Switch s = makeSwitch(name, t("Necesita profil Mercedes verificat pentru ECU-ul detectat.",
+                          "Requires a verified Mercedes profile for the detected ECU."));
+                  s.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                      if (!buttonView.isPressed()) return;
+                      attemptCoding(key, name, isChecked, buttonView);
+                  });
+                  root.addView(s, smallGap());
+              }
+
+              private void attemptCoding(String key, String name, boolean enable, CompoundButton control) {
+                  control.setChecked(!enable);
+
+                  if (!isConnected()) {
+                      dialog(t("ELM327 neconectat", "ELM327 disconnected"),
+                              t("Conecteaza adaptorul inainte de codare.", "Connect the adapter before coding."));
+                      return;
+                  }
+                  if (!forceMode) {
+                      dialog(t("Safe Mode", "Safe Mode"),
+                              t("Activeaza Force Mode pentru a permite o tentativa de codare.",
+                                      "Enable Force Mode to allow a coding attempt."));
+                      return;
+                  }
+
+                  dialog(t("Profil necesar", "Profile required"),
+                          t("Nu exista inca un payload Mercedes verificat pentru \"" + name +
+                                          "\" pe modulul masinii tale. BenOBD nu va trimite hex-uri universale sau inventate. " +
+                                          "Citeste masina si foloseste jurnalul pentru identificarea profilului exact.",
+                                  "There is not yet a verified Mercedes payload for \"" + name +
+                                          "\" on your vehicle module. BenOBD will not send universal or invented hex values. " +
+                                          "Read the vehicle and use the log to identify the exact profile."));
+              }
+
+              private void choosePairedDevice() {
+                  if (!hasBtPermission()) {
+                      requestBtPermission();
+                      return;
+                  }
+                  if (adapter == null) {
+                      dialog("Bluetooth", t("Telefonul nu are Bluetooth disponibil.", "Bluetooth is unavailable."));
+                      return;
+                  }
+
+                  Set<BluetoothDevice> bonded = adapter.getBondedDevices();
+                  List<BluetoothDevice> devices = new ArrayList<>();
+                  if (bonded != null) {
+                      for (BluetoothDevice d : bonded) {
+                          String n = safeName(d);
+                          String low = n.toLowerCase(Locale.ROOT);
+                          if (low.contains("elm") || low.contains("obd") || low.contains("vgate") ||
+                                  low.contains("vlink") || low.contains("obdii")) {
+                              devices.add(d);
+                          }
+                      }
+                  }
+
+                  if (devices.isEmpty()) {
+                      dialog(t("Niciun ELM327 gasit", "No ELM327 found"),
+                              t("Imperecheaza adaptorul din setarile Bluetooth ale telefonului si incearca din nou.",
+                                      "Pair the adapter in Android Bluetooth settings and try again."));
+                      return;
+                  }
+
+                  String[] names = new String[devices.size()];
+                  for (int i = 0; i < devices.size(); i++) {
+                      BluetoothDevice d = devices.get(i);
+                      names[i] = safeName(d) + "\n" + d.getAddress();
+                  }
+
+                  new AlertDialog.Builder(this)
+                          .setTitle(t("Alege adaptorul", "Choose adapter"))
+                          .setItems(names, (dialog, which) -> {
+                              selectedDevice = devices.get(which);
+                              status.setText(t("Selectat: ", "Selected: ") + safeName(selectedDevice));
+                          })
+                          .show();
+              }
+
+              private void connectSelected() {
+                  if (!hasBtPermission()) {
+                      requestBtPermission();
+                      return;
+                  }
+                  if (selectedDevice == null) {
+                      choosePairedDevice();
+                      return;
+                  }
+
+                  status.setText(t("Conectare...", "Connecting..."));
+                  connectButton.setEnabled(false);
+
+                  io.execute(() -> {
+                      try {
+                          closeSocket();
+                          socket = selectedDevice.createRfcommSocketToServiceRecord(SPP);
+                          socket.connect();
+                          input = socket.getInputStream();
+                          output = socket.getOutputStream();
+
+                          appendLog("CONNECTED " + safeName(selectedDevice));
+                          elm("ATZ", 1800);
+                          elm("ATE0", 700);
+                          elm("ATL0", 700);
+                          elm("ATS0", 700);
+                          elm("ATH0", 700);
+                          elm("ATSP0", 700);
+                          String id = elm("ATI", 800);
+
+                          main.post(() -> {
+                              status.setText(t("Conectat: ", "Connected: ") + safeName(selectedDevice) +
+                                      (id.isEmpty() ? "" : " • " + clean(id)));
+                              connectButton.setEnabled(true);
+                              readButton.setEnabled(true);
+                          });
+                      } catch (Exception e) {
+                          appendLog("ERROR " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                          closeSocket();
+                          main.post(() -> {
+                              status.setText(t("Conectarea a esuat", "Connection failed"));
+                              connectButton.setEnabled(true);
+                              readButton.setEnabled(false);
+                          });
+                      }
+                  });
+              }
+
+              private void readVehicle() {
+                  if (!isConnected()) return;
+                  readButton.setEnabled(false);
+                  io.execute(() -> {
+                      try {
+                          String volts = elm("ATRV", 800);
+                          String protocol = elm("ATDPN", 800);
+                          String vin = elm("0902", 1800);
+                          String pids = elm("0100", 1200);
+                          String dtcs = elm("03", 1500);
+
+                          appendLog("VOLTAGE: " + clean(volts));
+                          appendLog("PROTOCOL: " + clean(protocol));
+                          appendLog("VIN RAW: " + clean(vin));
+                          appendLog("PID 0100: " + clean(pids));
+                          appendLog("DTC 03: " + clean(dtcs));
+
+                          main.post(() -> {
+                              status.setText(t("Masina citita • ", "Vehicle read • ") + clean(volts));
+                              readButton.setEnabled(true);
+                          });
+                      } catch (Exception e) {
+                          appendLog("READ ERROR: " + e.getMessage());
+                          main.post(() -> readButton.setEnabled(true));
+                      }
+                  });
+              }
+
+              private String elm(String command, long waitMs) throws Exception {
+                  if (output == null || input == null) throw new IllegalStateException("No socket");
+                  while (input.available() > 0) input.read();
+                  output.write((command + "\r").getBytes(StandardCharsets.US_ASCII));
+                  output.flush();
+
+                  long end = System.currentTimeMillis() + waitMs;
+                  StringBuilder sb = new StringBuilder();
+                  while (System.currentTimeMillis() < end) {
+                      while (input.available() > 0) {
+                          int b = input.read();
+                          if (b < 0) break;
+                          char c = (char) b;
+                          if (c == '>') {
+                              String r = sb.toString().trim();
+                              appendLog("> " + command + "\n" + clean(r));
+                              return r;
+                          }
+                          sb.append(c);
+                      }
+                      Thread.sleep(25);
+                  }
+                  String r = sb.toString().trim();
+                  appendLog("> " + command + "\n" + clean(r) + " [timeout]");
+                  return r;
+              }
+
+              private void appendLog(String text) {
+                  main.post(() -> {
+                      if (log == null) return;
+                      String old = log.getText().toString();
+                      String next = old + "\n\n" + text;
+                      if (next.length() > 12000) next = next.substring(next.length() - 12000);
+                      log.setText(next);
+                  });
+              }
+
+              private boolean isConnected() {
+                  return socket != null && socket.isConnected() && input != null && output != null;
+              }
+
+              private void closeSocket() {
+                  try { if (input != null) input.close(); } catch (Exception ignored) {}
+                  try { if (output != null) output.close(); } catch (Exception ignored) {}
+                  try { if (socket != null) socket.close(); } catch (Exception ignored) {}
+                  input = null;
+                  output = null;
+                  socket = null;
+              }
+
+              @Override
+              protected void onDestroy() {
+                  closeSocket();
+                  io.shutdownNow();
+                  super.onDestroy();
+              }
+
+              private boolean hasBtPermission() {
+                  return Build.VERSION.SDK_INT < 31 ||
+                          checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+              }
+
+              private void requestBtPermission() {
+                  if (Build.VERSION.SDK_INT >= 31 && !hasBtPermission()) {
+                      requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, 77);
+                  }
+              }
+
+              private String safeName(BluetoothDevice d) {
+                  if (d == null) return "ELM327";
+                  try {
+                      String n = d.getName();
+                      return n == null || n.trim().isEmpty() ? "ELM327" : n;
+                  } catch (SecurityException e) {
+                      return "ELM327";
+                  }
+              }
+
+              private String clean(String s) {
+                  if (s == null) return "";
+                  return s.replace("\r", " ").replace("\n", " ").replaceAll("\\s+", " ").trim();
+              }
+
+              private String t(String ro, String en) {
+                  return english ? en : ro;
+              }
+
+              private void toast(String s) {
+                  Toast.makeText(this, s, Toast.LENGTH_SHORT).show();
+              }
+
+              private void dialog(String title, String message) {
+                  new AlertDialog.Builder(this)
+                          .setTitle(title)
+                          .setMessage(message)
+                          .setPositiveButton("OK", null)
+                          .show();
+              }
+
+              private LinearLayout card() {
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.HORIZONTAL);
+                  l.setGravity(Gravity.CENTER_VERTICAL);
+                  l.setPadding(dp(14), dp(7), dp(8), dp(7));
+                  l.setBackground(roundRect(CARD, Color.rgb(38, 45, 49), 1));
+                  return l;
+              }
+
+              private Switch makeSwitch(String name, String description) {
+                  Switch s = new Switch(this);
+                  s.setText(name + "\n" + description);
+                  s.setTextColor(TEXT);
+                  s.setTextSize(15);
+                  s.setPadding(dp(14), dp(10), dp(10), dp(10));
+                  s.setGravity(Gravity.CENTER_VERTICAL);
+                  s.setBackground(roundRect(CARD, Color.rgb(38, 45, 49), 1));
+                  return s;
+              }
+
+              private TextView label(String text, int size, int color, boolean bold) {
+                  TextView tv = new TextView(this);
+                  tv.setText(text);
+                  tv.setTextSize(size);
+                  tv.setTextColor(color);
+                  if (bold) tv.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  tv.setGravity(Gravity.CENTER_VERTICAL);
+                  return tv;
+              }
+
+              private Button button(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextColor(Color.rgb(5, 20, 11));
+                  b.setTextSize(15);
+                  b.setAllCaps(false);
+                  b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+                  b.setBackground(roundRect(GREEN, GREEN, 0));
+                  return b;
+              }
+
+              private GradientDrawable roundRect(int fill, int stroke, int widthDp) {
+                  GradientDrawable d = new GradientDrawable();
+                  d.setColor(fill);
+                  d.setCornerRadius(dp(14));
+                  if (widthDp > 0) d.setStroke(dp(widthDp), stroke);
+                  return d;
+              }
+
+              private LinearLayout.LayoutParams params() {
+                  return new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT);
+              }
+
+              private LinearLayout.LayoutParams section() {
+                  LinearLayout.LayoutParams p = params();
+                  p.topMargin = dp(10);
+                  return p;
+              }
+
+              private LinearLayout.LayoutParams smallGap() {
+                  LinearLayout.LayoutParams p = params();
+                  p.topMargin = dp(7);
+                  return p;
+              }
+
+              private LinearLayout.LayoutParams titleGap() {
+                  LinearLayout.LayoutParams p = params();
+                  p.topMargin = dp(24);
+                  p.bottomMargin = dp(4);
+                  return p;
+              }
+
+              private int dp(int value) {
+                  return Math.round(value * getResources().getDisplayMetrics().density);
+              }
+          }
+          EOF
+
+      - name: Build debug APK
+        run: gradle --no-daemon :app:assembleDebug
+
+      - name: Verify APK
+        run: |
+          test -f app/build/outputs/apk/debug/app-debug.apk
+          ls -lh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload BenOBD APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BenOBD-v2-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
