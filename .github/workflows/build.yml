@@ -1,4 +1,4 @@
-name: Build BenOBD v5.1 Timed Deep Diagnostics APK
+name: Build BenOBD v5.2 Timed Deep Diagnostics APK
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Create BenOBD v5.1 Android project
+      - name: Create BenOBD v5.2 Android project
         shell: bash
         run: |
           mkdir -p app/src/main/java/ro/benobd/app
@@ -79,8 +79,8 @@ jobs:
                   applicationId "ro.benobd.app"
                   minSdk 26
                   targetSdk 35
-                  versionCode 7
-                  versionName "5.1.0"
+                  versionCode 8
+                  versionName "5.2.0"
               }
           }
           EOF
@@ -235,6 +235,33 @@ jobs:
           
               private String currentScanText = "";
               private String latestUdsReport = "";
+
+              private long obdScanStartMs = 0L;
+              private long deepScanStartMs = 0L;
+              private String obdStage = "";
+              private String deepStage = "";
+
+              private final Runnable obdClock = new Runnable() {
+                  @Override public void run() {
+                      if (obdScanStartMs <= 0L || obdTimer == null) return;
+                      long ms = SystemClock.elapsedRealtime() - obdScanStartMs;
+                      obdTimer.setText(t("Procesare scanare: ", "Scan processing: ")
+                              + formatDuration(ms)
+                              + (obdStage.isEmpty() ? "" : "  •  " + obdStage));
+                      main.postDelayed(this, 100);
+                  }
+              };
+
+              private final Runnable deepClock = new Runnable() {
+                  @Override public void run() {
+                      if (deepScanStartMs <= 0L || deepTimer == null) return;
+                      long ms = SystemClock.elapsedRealtime() - deepScanStartMs;
+                      deepTimer.setText(t("Procesare Deep Scan: ", "Deep Scan processing: ")
+                              + formatDuration(ms)
+                              + (deepStage.isEmpty() ? "" : "  •  " + deepStage));
+                      main.postDelayed(this, 100);
+                  }
+              };
           
               private final Runnable liveTick = new Runnable() {
                   @Override public void run() {
@@ -296,7 +323,7 @@ jobs:
                   english = prefs.getBoolean("english", false);
                   if (!prefs.contains("tech_log")) {
                       prefs.edit().putString("tech_log",
-                              t("BenOBD v5.1 pornit.", "BenOBD v5.1 started.")).apply();
+                              t("BenOBD v5.2 pornit.", "BenOBD v5.2 started.")).apply();
                   }
                   adapter = BluetoothAdapter.getDefaultAdapter();
                   requestBtPermission();
@@ -327,7 +354,7 @@ jobs:
                   headText.addView(label("BenOBD", 29, TEXT, true));
                   headText.addView(label(t("Mercedes W204 Deep Diagnostics", "Mercedes W204 Deep Diagnostics"),
                           14, MUTED, false));
-                  headText.addView(label("v5.1 • Timed Deep Diagnostics", 11, GREEN, false));
+                  headText.addView(label("v5.2 • Timed Deep Diagnostics", 11, GREEN, false));
                   header.addView(headText, new LinearLayout.LayoutParams(
                           0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                   root.addView(header, section());
@@ -428,6 +455,9 @@ jobs:
                   root.addView(supported, smallGap());
           
                   sectionTitle(t("Diagnoza OBD-II completa", "Complete OBD-II diagnostics"));
+
+                  obdTimer = statusPill(t("Pregatit pentru scanare", "Ready to scan"));
+                  root.addView(obdTimer, smallGap());
           
                   dtcButton = button(t("Scan complet erori si memorii OBD", "Full OBD fault-memory scan"));
                   dtcButton.setOnClickListener(v -> fullObdScan());
@@ -455,6 +485,9 @@ jobs:
                   root.addView(dtcBox, section());
           
                   sectionTitle(t("Mercedes Deep Scan - Read Only", "Mercedes Deep Scan - Read Only"));
+
+                  deepTimer = statusPill(t("Deep Scan pregatit", "Deep Scan ready"));
+                  root.addView(deepTimer, smallGap());
           
                   TextView deepInfo = label(t(
                           "Scaneaza adresarea CAN de diagnoza 7E0-7E7 si incearca servicii UDS numai de citire: identificare ECU, memoria DTC, status bits, mirror memory, permanent status, snapshots si extended data unde modulul le suporta.",
@@ -535,8 +568,8 @@ jobs:
                   addCodingSwitch("confirm", t("Confirmare lumini la inchidere", "Lock light confirmation"));
           
                   TextView safe = label(t(
-                          "BenOBD v4 nu scrie arbitrar in ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor sau TCU. Pentru aceste module foloseste doar diagnoza Read-Only pana exista profil validat.",
-                          "BenOBD v4 never writes arbitrary data to ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU or TCU. These modules remain Read-Only until a validated profile exists."),
+                          "BenOBD v5.2 nu scrie arbitrar in ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor sau TCU. Pentru aceste module foloseste doar diagnoza Read-Only pana exista profil validat.",
+                          "BenOBD v5.2 never writes arbitrary data to ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU or TCU. These modules remain Read-Only until a validated profile exists."),
                           12, GREEN, false);
                   safe.setPadding(dp(10), dp(10), dp(10), dp(10));
                   root.addView(safe, smallGap());
@@ -998,15 +1031,15 @@ jobs:
                                   long totalStart = SystemClock.elapsedRealtime();
                                   String report = runDeepUdsScanInternal();
                                   long totalMs = SystemClock.elapsedRealtime() - totalStart;
-                                  report = report + "\n\n"
+                                  final String finalReport = report + "\n\n"
                                           + t("TIMP TOTAL DEEP SCAN: ", "TOTAL DEEP SCAN TIME: ")
                                           + formatDuration(totalMs);
-                                  latestUdsReport = report;
-                                  currentScanText = currentScanText + "\n\n" + report;
-                                  appendLog("MERCEDES DEEP SCAN\n" + report);
+                                  latestUdsReport = finalReport;
+                                  currentScanText = currentScanText + "\n\n" + finalReport;
+                                  appendLog("MERCEDES DEEP SCAN\n" + finalReport);
                                   stopDeepClock(totalMs, true);
                                   main.post(() -> {
-                                      deepBox.setText(report);
+                                      deepBox.setText(finalReport);
                                       deepButton.setEnabled(true);
                                   });
                               } catch (Exception e) {
@@ -1035,6 +1068,7 @@ jobs:
                       int rx = tx + 8;
                       String txs = String.format(Locale.US, "%03X", tx);
                       String rxs = String.format(Locale.US, "%03X", rx);
+                      setDeepStage("ECU " + txs + " -> " + rxs);
           
                       setCanHeader(txs, rxs);
           
@@ -1126,6 +1160,7 @@ jobs:
                       int limit = Math.min(dtcs.size(), 8);
                       for (int i = 0; i < limit; i++) {
                           String dtc = dtcs.get(i);
+                          setDeepStage("ECU " + txs + " / DTC " + dtc);
           
                           String sev = elm("1909" + dtc, 1400);
                           if (isUseful(sev)) {
@@ -2453,11 +2488,11 @@ jobs:
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v5.1.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v5.2.apk
 
-      - name: Upload BenOBD v5.1 APK
+      - name: Upload BenOBD v5.2 APK
         uses: actions/upload-artifact@v4
         with:
-          name: BenOBD-v5.1-APK
-          path: BenOBD-v5.1.apk
+          name: BenOBD-v5.2-APK
+          path: BenOBD-v5.2.apk
           retention-days: 30
