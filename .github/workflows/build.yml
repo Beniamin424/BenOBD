@@ -1,4 +1,4 @@
-name: Build BenOBD v5.2 Timed Deep Diagnostics APK
+name: Build BenOBD v6 Multi-Tab Diagnostics APK
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Create BenOBD v5.2 Android project
+      - name: Create BenOBD v6 Android project
         shell: bash
         run: |
           mkdir -p app/src/main/java/ro/benobd/app
@@ -79,8 +79,8 @@ jobs:
                   applicationId "ro.benobd.app"
                   minSdk 26
                   targetSdk 35
-                  versionCode 8
-                  versionName "5.2.0"
+                  versionCode 9
+                  versionName "6.0.0"
               }
           }
           EOF
@@ -100,9 +100,6 @@ jobs:
                   android:label="BenOBD"
                   android:supportsRtl="true"
                   android:theme="@style/AppTheme">
-                  <activity
-                      android:name=".LogActivity"
-                      android:exported="false"/>
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -130,7 +127,11 @@ jobs:
           </resources>
           EOF
 
-          cp .github/workflows/w204_icon.jpg app/src/main/res/drawable/w204_icon.jpg
+          if [ -f .github/workflows/w204_icon.png ]; then
+            cp .github/workflows/w204_icon.png app/src/main/res/drawable/w204_icon.png
+          else
+            cp .github/workflows/w204_icon.jpg app/src/main/res/drawable/w204_icon.jpg
+          fi
 
           cat > app/src/main/java/ro/benobd/app/MainActivity.java <<'EOF'
           package ro.benobd.app;
@@ -155,11 +156,14 @@ jobs:
           import android.os.Handler;
           import android.os.Looper;
           import android.os.SystemClock;
+          import android.net.Uri;
           import android.text.InputType;
           import android.view.Gravity;
+          import android.view.View;
           import android.view.ViewGroup;
           import android.widget.Button;
           import android.widget.EditText;
+          import android.widget.FrameLayout;
           import android.widget.ImageView;
           import android.widget.LinearLayout;
           import android.widget.ScrollView;
@@ -207,6 +211,14 @@ jobs:
               private OutputStream output;
           
               private LinearLayout root;
+              private ScrollView diagnosticsTab;
+              private ScrollView activationsTab;
+              private ScrollView logTab;
+              private Button navDiagnostics;
+              private Button navActivations;
+              private Button navLog;
+              private TextView activationAdapterStatus;
+              private String adapterKind = "UNKNOWN";
               private TextView status;
               private TextView vehicleInfo;
               private TextView dtcBox;
@@ -323,7 +335,7 @@ jobs:
                   english = prefs.getBoolean("english", false);
                   if (!prefs.contains("tech_log")) {
                       prefs.edit().putString("tech_log",
-                              t("BenOBD v5.2 pornit.", "BenOBD v5.2 started.")).apply();
+                              t("BenOBD v6 pornit.", "BenOBD v6 started.")).apply();
                   }
                   adapter = BluetoothAdapter.getDefaultAdapter();
                   requestBtPermission();
@@ -331,21 +343,60 @@ jobs:
               }
           
               private void drawUi() {
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.setFillViewport(true);
-                  scroll.setBackgroundColor(BG);
-          
-                  root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(16), dp(12), dp(16), dp(44));
-                  scroll.addView(root, new ScrollView.LayoutParams(
+                  LinearLayout shell = new LinearLayout(this);
+                  shell.setOrientation(LinearLayout.VERTICAL);
+                  shell.setBackgroundColor(BG);
+
+                  FrameLayout content = new FrameLayout(this);
+
+                  diagnosticsTab = new ScrollView(this);
+                  diagnosticsTab.setFillViewport(true);
+                  diagnosticsTab.setBackgroundColor(BG);
+                  LinearLayout diagnosticsRoot = new LinearLayout(this);
+                  diagnosticsRoot.setOrientation(LinearLayout.VERTICAL);
+                  diagnosticsRoot.setPadding(dp(16), dp(12), dp(16), dp(34));
+                  diagnosticsTab.addView(diagnosticsRoot, new ScrollView.LayoutParams(
                           ViewGroup.LayoutParams.MATCH_PARENT,
                           ViewGroup.LayoutParams.WRAP_CONTENT));
-          
+
+                  activationsTab = new ScrollView(this);
+                  activationsTab.setFillViewport(true);
+                  activationsTab.setBackgroundColor(BG);
+                  LinearLayout activationsRoot = new LinearLayout(this);
+                  activationsRoot.setOrientation(LinearLayout.VERTICAL);
+                  activationsRoot.setPadding(dp(16), dp(12), dp(16), dp(34));
+                  activationsTab.addView(activationsRoot, new ScrollView.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  logTab = new ScrollView(this);
+                  logTab.setFillViewport(true);
+                  logTab.setBackgroundColor(BG);
+                  LinearLayout logRoot = new LinearLayout(this);
+                  logRoot.setOrientation(LinearLayout.VERTICAL);
+                  logRoot.setPadding(dp(16), dp(12), dp(16), dp(34));
+                  logTab.addView(logRoot, new ScrollView.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  content.addView(diagnosticsTab, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT));
+                  content.addView(activationsTab, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT));
+                  content.addView(logTab, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  shell.addView(content, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 0, 1));
+
+                  root = diagnosticsRoot;
                   LinearLayout header = cardHorizontal();
                   ImageView logo = new ImageView(this);
                   logo.setImageResource(ro.benobd.app.R.drawable.w204_icon);
-                  logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                  logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
                   header.addView(logo, new LinearLayout.LayoutParams(dp(86), dp(86)));
           
                   LinearLayout headText = new LinearLayout(this);
@@ -354,7 +405,7 @@ jobs:
                   headText.addView(label("BenOBD", 29, TEXT, true));
                   headText.addView(label(t("Mercedes W204 Deep Diagnostics", "Mercedes W204 Deep Diagnostics"),
                           14, MUTED, false));
-                  headText.addView(label("v5.2 • Timed Deep Diagnostics", 11, GREEN, false));
+                  headText.addView(label("v6.0 • Deep Diagnostics + Coding Hub", 11, GREEN, false));
                   header.addView(headText, new LinearLayout.LayoutParams(
                           0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                   root.addView(header, section());
@@ -545,54 +596,387 @@ jobs:
                   expertHint.setPadding(dp(10), dp(10), dp(10), dp(10));
                   root.addView(expertHint, smallGap());
           
-                  sectionTitle(t("Codari si activari", "Coding and activations"));
-          
+
+                  addDonationCard();
+
+                  root = activationsRoot;
+
+                  LinearLayout actHeader = cardHorizontal();
+                  ImageView actLogo = new ImageView(this);
+                  actLogo.setImageResource(ro.benobd.app.R.drawable.w204_icon);
+                  actLogo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  actHeader.addView(actLogo, new LinearLayout.LayoutParams(dp(82), dp(82)));
+
+                  LinearLayout actText = new LinearLayout(this);
+                  actText.setOrientation(LinearLayout.VERTICAL);
+                  actText.setPadding(dp(12), 0, 0, 0);
+                  actText.addView(label(t("Activari Mercedes", "Mercedes activations"),
+                          24, TEXT, true));
+                  actText.addView(label(t(
+                          "Fiecare functie arata modulul si interfata necesara.",
+                          "Every function shows the required module and interface."),
+                          12, MUTED, false));
+                  actHeader.addView(actText, new LinearLayout.LayoutParams(
+                          0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                  root.addView(actHeader, section());
+
+                  activationAdapterStatus = statusPill(t(
+                          "Interfata curenta: neconectata",
+                          "Current interface: disconnected"));
+                  root.addView(activationAdapterStatus, smallGap());
+
+                  TextView codingInfo = label(t(
+                          "Conectare directa Android: ELM327, STN si OBDLink prin Bluetooth Classic. Pentru coding avansat este recomandat OBDLink MX+/STN. OpenPort 2.0/J2534 si SDconnect C4/C5 necesita bridge/driver dedicat pentru control direct din Android.",
+                          "Direct Android connection: ELM327, STN and OBDLink over Bluetooth Classic. OBDLink MX+/STN is recommended for advanced coding. OpenPort 2.0/J2534 and SDconnect C4/C5 require a dedicated bridge/driver for direct Android control."),
+                          12, MUTED, false);
+                  codingInfo.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  codingInfo.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
+                  root.addView(codingInfo, smallGap());
+
                   Switch force = makeSwitch(
                           t("Force Mode experimental", "Experimental Force Mode"),
-                          t("Activeaza doar profile Mercedes verificate. Sistemele critice raman blocate.",
-                                  "Only enables verified Mercedes profiles. Critical systems remain blocked."));
+                          t("Permite numai profile Mercedes validate pentru modulul detectat. Modulele critice raman blocate.",
+                                  "Allows only validated Mercedes profiles for the detected module. Critical modules remain blocked."));
                   force.setOnCheckedChangeListener((b, checked) -> {
                       forceMode = checked;
                       toast(checked ? t("Force Mode activ.", "Force Mode enabled.")
                               : t("Safe Mode activ.", "Safe Mode enabled."));
                   });
-                  root.addView(force, smallGap());
-          
-                  addCodingSwitch("needle", "Needle Sweep");
-                  addCodingSwitch("amg", "AMG Menu / Display");
-                  addCodingSwitch("speed", t("Viteza digitala", "Digital speed"));
-                  addCodingSwitch("mirrors", t("Oglinzi la incuiere", "Fold mirrors on lock"));
-                  addCodingSwitch("autolock", "Auto Lock");
-                  addCodingSwitch("drl", "DRL");
-                  addCodingSwitch("welcome", "Coming Home / Welcome Lights");
-                  addCodingSwitch("confirm", t("Confirmare lumini la inchidere", "Lock light confirmation"));
-          
+                  root.addView(force, section());
+
+                  addActivationCard("needle", "Needle Sweep",
+                          "IC_204 / Instrument Cluster",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Necesita profil de cluster compatibil cu software-ul masinii.",
+                                  "Requires a cluster profile matching the vehicle software."));
+
+                  addActivationCard("amg", "AMG Menu / Display",
+                          "IC_204 / Instrument Cluster",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Pe multe IC_204 este necesar SecurityAccess/seed-key inainte de scriere.",
+                                  "Many IC_204 variants require SecurityAccess/seed-key before writing."));
+
+                  addActivationCard("speed", t("Viteza digitala", "Digital speed"),
+                          "IC_204 / Instrument Cluster",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Disponibilitatea depinde de varianta de cluster si software.",
+                                  "Availability depends on the cluster variant and software."));
+
+                  addActivationCard("mirrors", t("Oglinzi la incuiere", "Fold mirrors on lock"),
+                          "CGW_204 + IC_204 / Door modules",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Necesita hardware de oglinzi rabatabile si coding in modulele compatibile.",
+                                  "Requires folding-mirror hardware and coding in compatible modules."));
+
+                  addActivationCard("autolock", "Auto Lock",
+                          "CGW / IC / SAM",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("BenOBD trebuie sa identifice varianta exacta inainte de scriere.",
+                                  "BenOBD must identify the exact variant before writing."));
+
+                  addActivationCard("drl", "DRL",
+                          "Front SAM / SAMF_204 or SAMF_172",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Parametrii DRL difera intre pre-facelift si facelift.",
+                                  "DRL parameters differ between pre-facelift and facelift."));
+
+                  addActivationCard("welcome", "Coming Home / Welcome Lights",
+                          "Front SAM / CGW",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Necesita citirea coding-ului curent si backup inainte de modificare.",
+                                  "Requires reading and backing up current coding before modification."));
+
+                  addActivationCard("confirm", t("Confirmare lumini la inchidere", "Lock light confirmation"),
+                          "Front SAM / CGW",
+                          "DIRECT: OBDLink MX+ / STN  •  EXTERNAL: OpenPort 2.0/J2534, SDconnect C4/C5",
+                          t("Se activeaza numai cand profilul modulului este recunoscut.",
+                                  "Enabled only when the module profile is recognized."));
+
                   TextView safe = label(t(
-                          "BenOBD v5.2 nu scrie arbitrar in ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor sau TCU. Pentru aceste module foloseste doar diagnoza Read-Only pana exista profil validat.",
-                          "BenOBD v5.2 never writes arbitrary data to ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU or TCU. These modules remain Read-Only until a validated profile exists."),
+                          "BenOBD v6 nu trimite payload-uri de coding ghicite. ABS/ESP, SRS/Airbag, EIS/EZS, ECU motor si TCU raman Read-Only pana exista profil validat si procedura de recovery.",
+                          "BenOBD v6 never sends guessed coding payloads. ABS/ESP, SRS/Airbag, EIS/EZS, engine ECU and TCU remain Read-Only until a validated profile and recovery procedure exist."),
                           12, GREEN, false);
                   safe.setPadding(dp(10), dp(10), dp(10), dp(10));
-                  root.addView(safe, smallGap());
-          
-                  sectionTitle(t("Jurnal tehnic", "Technical log"));
+                  root.addView(safe, section());
+
+                  root = logRoot;
+
+                  sectionTitle(t("Jurnal Tehnic", "Technical Log"));
 
                   TextView logInfo = label(t(
-                          "Jurnalul tehnic este acum pe o pagina separata. Scanarea continua sa scrie automat in el.",
-                          "The technical log is now on a separate page. Scans continue writing to it automatically."),
+                          "Comenzi OBD/UDS, raspunsuri ECU, timpi de procesare si erori de comunicatie.",
+                          "OBD/UDS commands, ECU responses, processing times and communication errors."),
                           12, MUTED, false);
                   logInfo.setPadding(dp(12), dp(10), dp(12), dp(10));
                   logInfo.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
                   root.addView(logInfo, smallGap());
 
-                  Button openLog = secondaryButton(
-                          t("Deschide Jurnalul Tehnic", "Open Technical Log"));
-                  openLog.setOnClickListener(v ->
-                          startActivity(new Intent(this, LogActivity.class)));
-                  root.addView(openLog, smallGap());
-          
-                  setContentView(scroll);
+                  log = monoBox(prefs.getString("tech_log",
+                          t("BenOBD v6 pornit.", "BenOBD v6 started.")));
+                  root.addView(log, section());
+
+                  Button refreshLog = secondaryButton(
+                          t("Reincarca jurnalul", "Refresh log"));
+                  refreshLog.setOnClickListener(v ->
+                          log.setText(prefs.getString("tech_log", "")));
+                  root.addView(refreshLog, smallGap());
+
+                  Button copyLog = secondaryButton(
+                          t("Copiaza jurnalul complet", "Copy full log"));
+                  copyLog.setOnClickListener(v -> {
+                      ClipboardManager cm =
+                              (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                      cm.setPrimaryClip(ClipData.newPlainText(
+                              "BenOBD technical log", log.getText()));
+                      toast(t("Jurnal copiat.", "Log copied."));
+                  });
+                  root.addView(copyLog, smallGap());
+
+                  Button clearLog = dangerButton(
+                          t("Goleste jurnalul", "Clear log"));
+                  clearLog.setOnClickListener(v -> {
+                      prefs.edit().putString("tech_log", "").apply();
+                      log.setText(t("Jurnalul este gol.", "The log is empty."));
+                  });
+                  root.addView(clearLog, smallGap());
+
+                  TextView footer = label("Developed by YAMIN BENE", 11, MUTED, true);
+                  footer.setGravity(Gravity.CENTER);
+                  footer.setPadding(dp(8), dp(7), dp(8), dp(4));
+                  shell.addView(footer, new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+
+                  LinearLayout nav = new LinearLayout(this);
+                  nav.setOrientation(LinearLayout.HORIZONTAL);
+                  nav.setPadding(dp(8), dp(6), dp(8), dp(8));
+                  nav.setBackgroundColor(CARD);
+
+                  navDiagnostics = navButton(t("DIAGNOZA", "DIAGNOSTICS"));
+                  navActivations = navButton(t("ACTIVARI", "ACTIVATIONS"));
+                  navLog = navButton(t("JURNAL", "LOG"));
+
+                  navDiagnostics.setOnClickListener(v -> showTab("diag"));
+                  navActivations.setOnClickListener(v -> showTab("act"));
+                  navLog.setOnClickListener(v -> showTab("log"));
+
+                  nav.addView(navDiagnostics, new LinearLayout.LayoutParams(0, dp(52), 1));
+                  nav.addView(navActivations, new LinearLayout.LayoutParams(0, dp(52), 1));
+                  nav.addView(navLog, new LinearLayout.LayoutParams(0, dp(52), 1));
+                  shell.addView(nav);
+
+                  setContentView(shell);
+                  showTab("diag");
               }
-          
+
+              private void showTab(String tab) {
+                  boolean diag = "diag".equals(tab);
+                  boolean act = "act".equals(tab);
+                  boolean lg = "log".equals(tab);
+
+                  diagnosticsTab.setVisibility(diag ? View.VISIBLE : View.GONE);
+                  activationsTab.setVisibility(act ? View.VISIBLE : View.GONE);
+                  logTab.setVisibility(lg ? View.VISIBLE : View.GONE);
+
+                  styleNavButton(navDiagnostics, diag);
+                  styleNavButton(navActivations, act);
+                  styleNavButton(navLog, lg);
+
+                  if (lg && log != null) {
+                      log.setText(prefs.getString("tech_log", ""));
+                  }
+                  if (act) {
+                      updateActivationAdapterStatus();
+                  }
+              }
+
+              private Button navButton(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setAllCaps(false);
+                  b.setTextSize(12);
+                  b.setTypeface(Typeface.create("sans-serif-light", Typeface.BOLD));
+                  return b;
+              }
+
+              private void styleNavButton(Button b, boolean active) {
+                  if (b == null) return;
+                  b.setTextColor(active ? Color.rgb(15,17,19) : TEXT);
+                  b.setBackground(roundRect(
+                          active ? ACCENT : CARD2,
+                          active ? ACCENT : Color.rgb(55,61,66), 1, 12));
+              }
+
+              private void addDonationCard() {
+                  LinearLayout card = new LinearLayout(this);
+                  card.setOrientation(LinearLayout.VERTICAL);
+                  card.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  card.setBackground(roundRect(
+                          Color.rgb(22, 27, 25),
+                          Color.rgb(64, 108, 82), 1, 16));
+
+                  card.addView(label("Buy me a coffee  •  1,10 EUR", 18, TEXT, true));
+                  card.addView(label(t(
+                          "Sustine dezvoltarea BenOBD",
+                          "Support BenOBD development"), 12, GREEN, false));
+
+                  LinearLayout payRow = new LinearLayout(this);
+                  payRow.setOrientation(LinearLayout.HORIZONTAL);
+                  payRow.setPadding(0, dp(8), 0, 0);
+
+                  Button revolut = secondaryButton("REVOLUT  @beniamin24");
+                  revolut.setOnClickListener(v ->
+                          openExternal("https://revolut.me/beniamin24"));
+
+                  Button paypal = secondaryButton("PAYPAL  @YaminBene");
+                  paypal.setOnClickListener(v ->
+                          openExternal("https://paypal.me/YaminBene/1.10EUR"));
+
+                  LinearLayout.LayoutParams left = new LinearLayout.LayoutParams(0, dp(52), 1);
+                  left.setMargins(0, 0, dp(4), 0);
+                  LinearLayout.LayoutParams right = new LinearLayout.LayoutParams(0, dp(52), 1);
+                  right.setMargins(dp(4), 0, 0, 0);
+                  payRow.addView(revolut, left);
+                  payRow.addView(paypal, right);
+                  card.addView(payRow);
+
+                  root.addView(card, section());
+              }
+
+              private void openExternal(String url) {
+                  try {
+                      startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+                  } catch (Exception e) {
+                      dialog(t("Nu pot deschide linkul", "Cannot open link"), url);
+                  }
+              }
+
+              private void updateActivationAdapterStatus() {
+                  if (activationAdapterStatus == null) return;
+                  String text = t("Interfata curenta: ", "Current interface: ") + adapterKind;
+                  if ("ELM327".equals(adapterKind)) {
+                      text += t(" • diagnoza OK, coding avansat nerecomandat",
+                              " • diagnostics OK, advanced coding not recommended");
+                  } else if (adapterKind.contains("OBDLINK") || adapterKind.contains("STN")) {
+                      text += t(" • potrivita pentru raw CAN/UDS si profile validate",
+                              " • suitable for raw CAN/UDS and validated profiles");
+                  }
+                  activationAdapterStatus.setText(text);
+              }
+
+              private String detectAdapterKind(String ati) {
+                  String x = clean(ati).toUpperCase(Locale.ROOT);
+                  String name = selectedDevice == null ? "" :
+                          safeName(selectedDevice).toUpperCase(Locale.ROOT);
+                  if (x.contains("OBDLINK") || name.contains("OBDLINK")) {
+                      return "OBDLINK / STN";
+                  }
+                  if (x.contains("STN") || name.contains("STN")) {
+                      return "STN";
+                  }
+                  if (x.contains("ELM") || name.contains("ELM")
+                          || name.contains("VGATE") || name.contains("VLINK")) {
+                      return "ELM327";
+                  }
+                  return clean(ati).isEmpty() ? "UNKNOWN" : clean(ati);
+              }
+
+              private void addActivationCard(
+                      String key, String name, String module,
+                      String adapters, String note) {
+                  LinearLayout card = new LinearLayout(this);
+                  card.setOrientation(LinearLayout.VERTICAL);
+                  card.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  card.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 16));
+
+                  LinearLayout top = new LinearLayout(this);
+                  top.setOrientation(LinearLayout.HORIZONTAL);
+                  top.setGravity(Gravity.CENTER_VERTICAL);
+
+                  LinearLayout txt = new LinearLayout(this);
+                  txt.setOrientation(LinearLayout.VERTICAL);
+                  txt.addView(label(name, 16, TEXT, true));
+                  txt.addView(label(t("Modul: ", "Module: ") + module, 11, MUTED, false));
+
+                  Switch sw = new Switch(this);
+                  sw.setChecked(false);
+
+                  top.addView(txt, new LinearLayout.LayoutParams(
+                          0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+                  top.addView(sw, new LinearLayout.LayoutParams(
+                          dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
+                  card.addView(top);
+
+                  TextView adapterText = label(
+                          t("Interfete: ", "Interfaces: ") + adapters, 11, GREEN, false);
+                  adapterText.setPadding(0, dp(8), 0, 0);
+                  card.addView(adapterText);
+
+                  TextView noteText = label(note, 11, MUTED, false);
+                  noteText.setPadding(0, dp(5), 0, 0);
+                  card.addView(noteText);
+
+                  sw.setOnCheckedChangeListener((buttonView, checked) -> {
+                      if (!buttonView.isPressed()) return;
+                      buttonView.setChecked(false);
+                      requestActivation(key, name, module, adapters);
+                  });
+
+                  root.addView(card, smallGap());
+              }
+
+              private void requestActivation(
+                      String key, String name, String module, String adapters) {
+                  if (!isConnected()) {
+                      dialog(t("Interfata necesara", "Interface required"),
+                              t("Pentru " + name + " ai nevoie de o interfata compatibila. "
+                                              + "Recomandat pentru BenOBD direct: OBDLink MX+/STN. "
+                                              + "Alternative de service: OpenPort 2.0/J2534 sau SDconnect C4/C5.\n\n"
+                                              + "Modul tinta: " + module,
+                                      "For " + name + " you need a compatible interface. "
+                                              + "Recommended for direct BenOBD use: OBDLink MX+/STN. "
+                                              + "Service alternatives: OpenPort 2.0/J2534 or SDconnect C4/C5.\n\n"
+                                              + "Target module: " + module));
+                      return;
+                  }
+
+                  if ("ELM327".equals(adapterKind)) {
+                      dialog(t("ELM327: doar diagnoza", "ELM327: diagnostics only"),
+                              t("ELM327 ramane disponibil pentru diagnoza, dar BenOBD nu va face coding cu el. "
+                                              + "Pentru activare foloseste OBDLink MX+/STN sau o interfata Mercedes/J2534 compatibila.",
+                                      "ELM327 remains available for diagnostics, but BenOBD will not perform coding with it. "
+                                              + "Use OBDLink MX+/STN or a compatible Mercedes/J2534 interface."));
+                      return;
+                  }
+
+                  if (!forceMode) {
+                      dialog("Safe Mode",
+                              t("Activeaza Force Mode numai dupa Deep Scan si backup.",
+                                      "Enable Force Mode only after Deep Scan and backup."));
+                      return;
+                  }
+
+                  String detail;
+                  if ("amg".equals(key)) {
+                      detail = t(
+                              "Interfata este compatibila, dar AMG Menu pe IC_204 necesita profil exact si, pe multe versiuni, SecurityAccess seed/key. BenOBD nu va ghici cheia sau bytes de EEPROM.",
+                              "The interface is compatible, but AMG Menu on IC_204 requires an exact profile and, on many versions, SecurityAccess seed/key. BenOBD will not guess keys or EEPROM bytes.");
+                  } else if ("drl".equals(key)) {
+                      detail = t(
+                              "Interfata este compatibila. Pentru DRL trebuie identificat Front SAM si varianta lui inainte de coding. BenOBD va permite scrierea doar cand profilul SAM este recunoscut.",
+                              "The interface is compatible. DRL coding requires identifying the Front SAM and its variant before coding. BenOBD will allow writing only when the SAM profile is recognized.");
+                  } else {
+                      detail = t(
+                              "Interfata este compatibila. Activarea devine executabila dupa ce Deep Scan identifica modulul si BenOBD gaseste un profil de coding valid pentru software-ul lui.",
+                              "The interface is compatible. The activation becomes executable after Deep Scan identifies the module and BenOBD finds a valid coding profile for its software.");
+                  }
+
+                  dialog(t("Profil de coding necesar", "Coding profile required"),
+                          name + "\n\n" + detail + "\n\n"
+                                  + t("Interfete declarate: ", "Declared interfaces: ")
+                                  + adapters);
+              }
+
               private LinearLayout row() {
                   LinearLayout l = new LinearLayout(this);
                   l.setOrientation(LinearLayout.HORIZONTAL);
@@ -728,6 +1112,7 @@ jobs:
                           String ati = elm("ATI", 1000);
                           String volts = elm("ATRV", 900);
                           String proto = elm("ATDP", 900);
+                          adapterKind = detectAdapterKind(ati);
           
                           appendLog("ADAPTER: " + clean(ati));
                           appendLog("VOLTAGE: " + clean(volts));
@@ -735,7 +1120,9 @@ jobs:
           
                           main.post(() -> {
                               status.setText(t("Conectat: ", "Connected: ")
-                                      + safeName(selectedDevice) + " • " + clean(volts));
+                                      + safeName(selectedDevice) + " • " + adapterKind
+                                      + " • " + clean(volts));
+                              updateActivationAdapterStatus();
                               connectButton.setEnabled(true);
                           });
                       } catch (Exception e) {
@@ -1535,35 +1922,6 @@ jobs:
                   return sb.toString().trim();
               }
           
-              private void addCodingSwitch(String key, String name) {
-                  Switch s = makeSwitch(name,
-                          t("Activare Mercedes specifica. Necesita profil verificat pentru modulul detectat.",
-                                  "Mercedes-specific activation. Requires a verified profile for the detected module."));
-          
-                  s.setOnCheckedChangeListener((buttonView, checked) -> {
-                      if (!buttonView.isPressed()) return;
-                      buttonView.setChecked(!checked);
-          
-                      if (!requireConnection()) return;
-          
-                      if (!forceMode) {
-                          dialog("Safe Mode",
-                                  t("Activeaza Force Mode pentru codari de confort.",
-                                          "Enable Force Mode for comfort coding."));
-                          return;
-                      }
-          
-                      dialog(t("Profil Mercedes necesar", "Mercedes profile required"),
-                              t("BenOBD nu inventeaza payload-uri de coding. Pentru " + name
-                                              + " trebuie identificat modulul si incarcata o secventa Mercedes verificata. "
-                                              + "Diagnoza Deep Scan ramane complet Read-Only.",
-                                      "BenOBD does not invent coding payloads. For " + name
-                                              + " the module must be identified and a verified Mercedes sequence loaded. "
-                                              + "Deep Scan remains fully Read-Only."));
-                  });
-          
-                  root.addView(s, smallGap());
-              }
           
               private String pid(String pid, int bytes, String type) throws Exception {
                   String raw = elm("01" + pid, 1100);
@@ -2247,237 +2605,6 @@ jobs:
           }
           EOF
 
-          cat > app/src/main/java/ro/benobd/app/LogActivity.java <<'EOF'
-          package ro.benobd.app;
-          
-          import android.app.Activity;
-          import android.content.ClipData;
-          import android.content.ClipboardManager;
-          import android.content.Context;
-          import android.content.SharedPreferences;
-          import android.graphics.Color;
-          import android.graphics.Typeface;
-          import android.graphics.drawable.GradientDrawable;
-          import android.os.Bundle;
-          import android.os.Handler;
-          import android.os.Looper;
-          import android.view.Gravity;
-          import android.view.ViewGroup;
-          import android.widget.Button;
-          import android.widget.LinearLayout;
-          import android.widget.ScrollView;
-          import android.widget.TextView;
-          import android.widget.Toast;
-          
-          public class LogActivity extends Activity {
-              private static final int BG = Color.rgb(8, 10, 12);
-              private static final int CARD = Color.rgb(18, 21, 24);
-              private static final int TEXT = Color.rgb(239, 243, 245);
-              private static final int MUTED = Color.rgb(150, 160, 166);
-              private static final int GREEN = Color.rgb(91, 219, 146);
-          
-              private SharedPreferences prefs;
-              private TextView logView;
-              private TextView sizeInfo;
-              private boolean english;
-              private final Handler handler = new Handler(Looper.getMainLooper());
-          
-              private final Runnable refreshLoop = new Runnable() {
-                  @Override public void run() {
-                      refreshLog();
-                      handler.postDelayed(this, 750);
-                  }
-              };
-          
-              @Override
-              protected void onCreate(Bundle state) {
-                  super.onCreate(state);
-                  prefs = getSharedPreferences("benobd", MODE_PRIVATE);
-                  english = prefs.getBoolean("english", false);
-                  drawUi();
-              }
-          
-              @Override
-              protected void onResume() {
-                  super.onResume();
-                  handler.removeCallbacks(refreshLoop);
-                  handler.post(refreshLoop);
-              }
-          
-              @Override
-              protected void onPause() {
-                  handler.removeCallbacks(refreshLoop);
-                  super.onPause();
-              }
-          
-              private void drawUi() {
-                  ScrollView scroll = new ScrollView(this);
-                  scroll.setFillViewport(true);
-                  scroll.setBackgroundColor(BG);
-          
-                  LinearLayout root = new LinearLayout(this);
-                  root.setOrientation(LinearLayout.VERTICAL);
-                  root.setPadding(dp(16), dp(16), dp(16), dp(40));
-                  scroll.addView(root, new ScrollView.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT,
-                          ViewGroup.LayoutParams.WRAP_CONTENT));
-          
-                  TextView title = label(
-                          t("Jurnal Tehnic", "Technical Log"), 26, TEXT, true);
-                  root.addView(title);
-          
-                  TextView subtitle = label(t(
-                          "Comenzi OBD/UDS, raspunsuri ECU, timpi de procesare si erori de comunicatie.",
-                          "OBD/UDS commands, ECU responses, processing times and communication errors."),
-                          12, MUTED, false);
-                  subtitle.setPadding(0, dp(4), 0, dp(8));
-                  root.addView(subtitle);
-          
-                  sizeInfo = label("", 11, GREEN, false);
-                  sizeInfo.setPadding(0, 0, 0, dp(8));
-                  root.addView(sizeInfo);
-          
-                  Button back = button(t("Inapoi la diagnoza", "Back to diagnostics"));
-                  back.setOnClickListener(v -> finish());
-                  root.addView(back, gap());
-          
-                  Button refresh = secondaryButton(
-                          t("Reincarca jurnalul", "Refresh log"));
-                  refresh.setOnClickListener(v -> refreshLog());
-                  root.addView(refresh, gap());
-          
-                  logView = label("", 12, Color.rgb(201, 209, 213), false);
-                  logView.setTypeface(Typeface.MONOSPACE);
-                  logView.setTextIsSelectable(true);
-                  logView.setPadding(dp(12), dp(12), dp(12), dp(12));
-                  logView.setBackground(roundRect(
-                          CARD, Color.rgb(43, 48, 53), 1, 14));
-                  root.addView(logView, gap());
-          
-                  Button copy = secondaryButton(
-                          t("Copiaza jurnalul complet", "Copy full log"));
-                  copy.setOnClickListener(v -> {
-                      ClipboardManager cm =
-                              (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                      cm.setPrimaryClip(ClipData.newPlainText(
-                              "BenOBD technical log", logView.getText()));
-                      Toast.makeText(this,
-                              t("Jurnal copiat.", "Log copied."),
-                              Toast.LENGTH_SHORT).show();
-                  });
-                  root.addView(copy, gap());
-          
-                  Button clear = dangerButton(
-                          t("Goleste jurnalul", "Clear log"));
-                  clear.setOnClickListener(v -> {
-                      prefs.edit().putString("tech_log", "").apply();
-                      refreshLog();
-                      Toast.makeText(this,
-                              t("Jurnal golit.", "Log cleared."),
-                              Toast.LENGTH_SHORT).show();
-                  });
-                  root.addView(clear, gap());
-          
-                  setContentView(scroll);
-                  refreshLog();
-              }
-          
-              private void refreshLog() {
-                  if (logView == null) return;
-                  String value = prefs.getString("tech_log", "");
-                  if (value.trim().isEmpty()) {
-                      logView.setText(t("Jurnalul este gol.", "The log is empty."));
-                      if (sizeInfo != null) {
-                          sizeInfo.setText(t("0 caractere", "0 characters"));
-                      }
-                      return;
-                  }
-          
-                  logView.setText(value);
-                  if (sizeInfo != null) {
-                      sizeInfo.setText(t("Marime jurnal: ", "Log size: ")
-                              + value.length() + t(" caractere", " characters"));
-                  }
-              }
-          
-              private String t(String ro, String en) {
-                  return english ? en : ro;
-              }
-          
-              private TextView label(String text, int size, int color, boolean bold) {
-                  TextView v = new TextView(this);
-                  v.setText(text);
-                  v.setTextSize(size);
-                  v.setTextColor(color);
-                  v.setTypeface(Typeface.create(
-                          "sans-serif-light",
-                          bold ? Typeface.BOLD : Typeface.NORMAL));
-                  v.setGravity(Gravity.CENTER_VERTICAL);
-                  return v;
-              }
-          
-              private Button button(String text) {
-                  Button b = new Button(this);
-                  b.setText(text);
-                  b.setTextColor(Color.rgb(15, 17, 19));
-                  b.setTextSize(15);
-                  b.setAllCaps(false);
-                  b.setTypeface(Typeface.create(
-                          "sans-serif-light", Typeface.BOLD));
-                  b.setBackground(roundRect(
-                          Color.rgb(218, 226, 231),
-                          Color.rgb(218, 226, 231), 0, 13));
-                  return b;
-              }
-          
-              private Button secondaryButton(String text) {
-                  Button b = new Button(this);
-                  b.setText(text);
-                  b.setTextColor(TEXT);
-                  b.setTextSize(14);
-                  b.setAllCaps(false);
-                  b.setTypeface(Typeface.create(
-                          "sans-serif-light", Typeface.NORMAL));
-                  b.setBackground(roundRect(
-                          Color.rgb(26, 30, 34),
-                          Color.rgb(66, 73, 78), 1, 13));
-                  return b;
-              }
-          
-              private Button dangerButton(String text) {
-                  Button b = secondaryButton(text);
-                  b.setTextColor(Color.rgb(255, 205, 205));
-                  b.setBackground(roundRect(
-                          Color.rgb(45, 20, 22),
-                          Color.rgb(116, 55, 58), 1, 13));
-                  return b;
-              }
-          
-              private GradientDrawable roundRect(
-                      int fill, int stroke, int width, int radius) {
-                  GradientDrawable d = new GradientDrawable();
-                  d.setColor(fill);
-                  d.setCornerRadius(dp(radius));
-                  if (width > 0) d.setStroke(dp(width), stroke);
-                  return d;
-              }
-          
-              private LinearLayout.LayoutParams gap() {
-                  LinearLayout.LayoutParams p =
-                          new LinearLayout.LayoutParams(
-                                  ViewGroup.LayoutParams.MATCH_PARENT,
-                                  ViewGroup.LayoutParams.WRAP_CONTENT);
-                  p.topMargin = dp(8);
-                  return p;
-              }
-          
-              private int dp(int value) {
-                  return Math.round(value
-                          * getResources().getDisplayMetrics().density);
-              }
-          }
-          EOF
-
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
@@ -2488,11 +2615,11 @@ jobs:
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v5.2.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v6.apk
 
-      - name: Upload BenOBD v5.2 APK
+      - name: Upload BenOBD v6 APK
         uses: actions/upload-artifact@v4
         with:
-          name: BenOBD-v5.2-APK
-          path: BenOBD-v5.2.apk
+          name: BenOBD-v6-APK
+          path: BenOBD-v6.apk
           retention-days: 30
