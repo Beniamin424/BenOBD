@@ -1,4 +1,4 @@
-name: Build BenOBD v4 Deep Diagnostics APK
+name: Build BenOBD v5.1 Timed Deep Diagnostics APK
 
 on:
   workflow_dispatch:
@@ -34,7 +34,7 @@ jobs:
         with:
           gradle-version: "8.9"
 
-      - name: Create BenOBD v4 Android project
+      - name: Create BenOBD v5.1 Android project
         shell: bash
         run: |
           mkdir -p app/src/main/java/ro/benobd/app
@@ -79,8 +79,8 @@ jobs:
                   applicationId "ro.benobd.app"
                   minSdk 26
                   targetSdk 35
-                  versionCode 5
-                  versionName "4.0.0"
+                  versionCode 7
+                  versionName "5.1.0"
               }
           }
           EOF
@@ -100,6 +100,9 @@ jobs:
                   android:label="BenOBD"
                   android:supportsRtl="true"
                   android:theme="@style/AppTheme">
+                  <activity
+                      android:name=".LogActivity"
+                      android:exported="false"/>
                   <activity
                       android:name=".MainActivity"
                       android:exported="true"
@@ -141,6 +144,7 @@ jobs:
           import android.content.ClipData;
           import android.content.ClipboardManager;
           import android.content.Context;
+          import android.content.Intent;
           import android.content.SharedPreferences;
           import android.content.pm.PackageManager;
           import android.graphics.Color;
@@ -150,6 +154,7 @@ jobs:
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.os.SystemClock;
           import android.text.InputType;
           import android.view.Gravity;
           import android.view.ViewGroup;
@@ -207,6 +212,8 @@ jobs:
               private TextView dtcBox;
               private TextView deepBox;
               private TextView log;
+              private TextView obdTimer;
+              private TextView deepTimer;
               private Button connectButton;
               private Button liveButton;
               private Button dtcButton;
@@ -287,6 +294,10 @@ jobs:
                   super.onCreate(state);
                   prefs = getSharedPreferences("benobd", MODE_PRIVATE);
                   english = prefs.getBoolean("english", false);
+                  if (!prefs.contains("tech_log")) {
+                      prefs.edit().putString("tech_log",
+                              t("BenOBD v5.1 pornit.", "BenOBD v5.1 started.")).apply();
+                  }
                   adapter = BluetoothAdapter.getDefaultAdapter();
                   requestBtPermission();
                   drawUi();
@@ -316,7 +327,7 @@ jobs:
                   headText.addView(label("BenOBD", 29, TEXT, true));
                   headText.addView(label(t("Mercedes W204 Deep Diagnostics", "Mercedes W204 Deep Diagnostics"),
                           14, MUTED, false));
-                  headText.addView(label("v4.0 • Read-first architecture", 11, GREEN, false));
+                  headText.addView(label("v5.1 • Timed Deep Diagnostics", 11, GREEN, false));
                   header.addView(headText, new LinearLayout.LayoutParams(
                           0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
                   root.addView(header, section());
@@ -530,23 +541,21 @@ jobs:
                   safe.setPadding(dp(10), dp(10), dp(10), dp(10));
                   root.addView(safe, smallGap());
           
-                  sectionTitle(t("Jurnal tehnic complet", "Full technical log"));
-          
-                  log = monoBox(t("BenOBD v4 pornit.", "BenOBD v4 started."));
-                  root.addView(log, smallGap());
-          
-                  Button copyLog = secondaryButton(t("Copiaza jurnalul complet", "Copy full log"));
-                  copyLog.setOnClickListener(v -> {
-                      ClipboardManager cm =
-                              (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                      cm.setPrimaryClip(ClipData.newPlainText("BenOBD log", log.getText()));
-                      toast(t("Jurnal copiat.", "Log copied."));
-                  });
-                  root.addView(copyLog, smallGap());
-          
-                  Button clearLog = secondaryButton(t("Goleste jurnalul", "Clear log"));
-                  clearLog.setOnClickListener(v -> log.setText(t("Jurnal golit.", "Log cleared.")));
-                  root.addView(clearLog, smallGap());
+                  sectionTitle(t("Jurnal tehnic", "Technical log"));
+
+                  TextView logInfo = label(t(
+                          "Jurnalul tehnic este acum pe o pagina separata. Scanarea continua sa scrie automat in el.",
+                          "The technical log is now on a separate page. Scans continue writing to it automatically."),
+                          12, MUTED, false);
+                  logInfo.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  logInfo.setBackground(roundRect(CARD, Color.rgb(43, 48, 53), 1, 14));
+                  root.addView(logInfo, smallGap());
+
+                  Button openLog = secondaryButton(
+                          t("Deschide Jurnalul Tehnic", "Open Technical Log"));
+                  openLog.setOnClickListener(v ->
+                          startActivity(new Intent(this, LogActivity.class)));
+                  root.addView(openLog, smallGap());
           
                   setContentView(scroll);
               }
@@ -783,54 +792,94 @@ jobs:
               private void fullObdScan() {
                   if (!requireConnection()) return;
                   dtcButton.setEnabled(false);
-          
+                  startObdClock();
+
                   io.execute(() -> {
                       StringBuilder report = new StringBuilder();
                       try {
-                          String storedRaw = elm("03", 2200);
-                          String pendingRaw = elm("07", 2200);
-                          String permanentRaw = elm("0A", 2200);
-                          String readinessRaw = elm("0101", 1600);
-                          String vinRaw = elm("0902", 2200);
-                          String calRaw = elm("0904", 1800);
-                          String cvnRaw = elm("0906", 1800);
-          
-                          List<String> stored = parseDtcs(storedRaw, 0x43);
-                          List<String> pending = parseDtcs(pendingRaw, 0x47);
-                          List<String> permanent = parseDtcs(permanentRaw, 0x4A);
-          
-                          report.append(t("STOCATE", "STORED")).append(":\n")
+                          long totalStart = SystemClock.elapsedRealtime();
+
+                          setObdStage(t("Erori stocate", "Stored faults"));
+                          TimedResponse storedT = timedElm("03", 2200);
+
+                          setObdStage(t("Erori pending", "Pending faults"));
+                          TimedResponse pendingT = timedElm("07", 2200);
+
+                          setObdStage(t("Erori permanente", "Permanent faults"));
+                          TimedResponse permanentT = timedElm("0A", 2200);
+
+                          setObdStage("Readiness / MIL");
+                          TimedResponse readinessT = timedElm("0101", 1600);
+
+                          setObdStage("VIN");
+                          TimedResponse vinT = timedElm("0902", 2200);
+
+                          setObdStage("Calibration ID");
+                          TimedResponse calT = timedElm("0904", 1800);
+
+                          setObdStage("CVN");
+                          TimedResponse cvnT = timedElm("0906", 1800);
+
+                          List<String> stored = parseDtcs(storedT.response, 0x43);
+                          List<String> pending = parseDtcs(pendingT.response, 0x47);
+                          List<String> permanent = parseDtcs(permanentT.response, 0x4A);
+
+                          report.append(t("STOCATE", "STORED"))
+                                  .append("  [").append(formatDuration(storedT.ms)).append("]:\n")
                                   .append(listWithFamily(stored))
-                                  .append("\n\nPENDING:\n")
+                                  .append("\n\nPENDING  [").append(formatDuration(pendingT.ms)).append("]:\n")
                                   .append(listWithFamily(pending))
                                   .append("\n\n")
-                                  .append(t("PERMANENTE", "PERMANENT")).append(":\n")
+                                  .append(t("PERMANENTE", "PERMANENT"))
+                                  .append("  [").append(formatDuration(permanentT.ms)).append("]:\n")
                                   .append(listWithFamily(permanent))
-                                  .append("\n\nREADINESS RAW:\n").append(clean(readinessRaw))
-                                  .append("\n\nVIN RAW:\n").append(clean(vinRaw))
-                                  .append("\n\nCAL ID RAW:\n").append(clean(calRaw))
-                                  .append("\n\nCVN RAW:\n").append(clean(cvnRaw));
-          
+                                  .append("\n\nREADINESS  [").append(formatDuration(readinessT.ms)).append("]:\n")
+                                  .append(clean(readinessT.response))
+                                  .append("\n\nVIN  [").append(formatDuration(vinT.ms)).append("]:\n")
+                                  .append(clean(vinT.response))
+                                  .append("\n\nCAL ID  [").append(formatDuration(calT.ms)).append("]:\n")
+                                  .append(clean(calT.response))
+                                  .append("\n\nCVN  [").append(formatDuration(cvnT.ms)).append("]:\n")
+                                  .append(clean(cvnT.response));
+
+                          setObdStage("Freeze Frame");
+                          long ffStart = SystemClock.elapsedRealtime();
                           String freeze = readFreezeFrameInternal();
+                          long ffMs = SystemClock.elapsedRealtime() - ffStart;
+
+                          setObdStage("Mode 06");
+                          long m6Start = SystemClock.elapsedRealtime();
                           String mode6 = readMode06Internal();
-          
-                          report.append("\n\nFREEZE FRAME:\n").append(freeze)
-                                  .append("\n\nMODE 06:\n").append(mode6);
-          
+                          long m6Ms = SystemClock.elapsedRealtime() - m6Start;
+
+                          long totalMs = SystemClock.elapsedRealtime() - totalStart;
+
+                          report.append("\n\nFREEZE FRAME  [")
+                                  .append(formatDuration(ffMs)).append("]:\n").append(freeze)
+                                  .append("\n\nMODE 06  [")
+                                  .append(formatDuration(m6Ms)).append("]:\n").append(mode6)
+                                  .append("\n\n")
+                                  .append(t("TIMP TOTAL SCANARE: ", "TOTAL SCAN TIME: "))
+                                  .append(formatDuration(totalMs));
+
                           currentScanText = report.toString();
                           appendLog("FULL OBD SCAN\n" + currentScanText);
-          
+                          stopObdClock(totalMs, true);
+
                           main.post(() -> {
                               dtcBox.setText(currentScanText);
                               dtcButton.setEnabled(true);
                           });
                       } catch (Exception e) {
                           appendLog("FULL OBD SCAN ERROR: " + e.getMessage());
+                          long ms = obdScanStartMs > 0L
+                                  ? SystemClock.elapsedRealtime() - obdScanStartMs : 0L;
+                          stopObdClock(ms, false);
                           main.post(() -> dtcButton.setEnabled(true));
                       }
                   });
               }
-          
+
               private void readFreezeFrame() {
                   if (!requireConnection()) return;
                   io.execute(() -> {
@@ -933,25 +982,38 @@ jobs:
               private void deepUdsScan() {
                   if (!requireConnection()) return;
                   deepButton.setEnabled(false);
+                  startDeepClock();
           
                   new AlertDialog.Builder(this)
                           .setTitle(t("Mercedes Deep Scan", "Mercedes Deep Scan"))
                           .setMessage(t(
                                   "Scanarea foloseste numai cereri de citire pe CAN si poate dura cateva minute. Nu face coding si nu actioneaza componente. Continui?",
                                   "The scan uses read-only CAN requests and may take a few minutes. It does not code modules or actuate components. Continue?"))
-                          .setNegativeButton(t("Anuleaza", "Cancel"), (d, w) -> deepButton.setEnabled(true))
+                          .setNegativeButton(t("Anuleaza", "Cancel"), (d, w) -> {
+                              deepButton.setEnabled(true);
+                              stopDeepClock(0L, false);
+                          })
                           .setPositiveButton(t("Scaneaza", "Scan"), (d, w) -> io.execute(() -> {
                               try {
+                                  long totalStart = SystemClock.elapsedRealtime();
                                   String report = runDeepUdsScanInternal();
+                                  long totalMs = SystemClock.elapsedRealtime() - totalStart;
+                                  report = report + "\n\n"
+                                          + t("TIMP TOTAL DEEP SCAN: ", "TOTAL DEEP SCAN TIME: ")
+                                          + formatDuration(totalMs);
                                   latestUdsReport = report;
                                   currentScanText = currentScanText + "\n\n" + report;
                                   appendLog("MERCEDES DEEP SCAN\n" + report);
+                                  stopDeepClock(totalMs, true);
                                   main.post(() -> {
                                       deepBox.setText(report);
                                       deepButton.setEnabled(true);
                                   });
                               } catch (Exception e) {
                                   appendLog("DEEP SCAN ERROR: " + e.getMessage());
+                                  long ms = deepScanStartMs > 0L
+                                          ? SystemClock.elapsedRealtime() - deepScanStartMs : 0L;
+                                  stopDeepClock(ms, false);
                                   try { initElm(); } catch (Exception ignored) {}
                                   main.post(() -> deepButton.setEnabled(true));
                               }
@@ -1141,6 +1203,10 @@ jobs:
                               .append("  status=0x")
                               .append(String.format(Locale.US, "%02X", statusByte))
                               .append("  ").append(decodeDtcStatus(statusByte))
+                              .append("\n  ↳ ").append(udsStatusExplanation(statusByte))
+                              .append("\n  ↳ ").append(t(
+                                      "Cod Mercedes/UDS de 24 biti; componenta exacta necesita baza specifica modulului.",
+                                      "24-bit Mercedes/UDS code; exact component wording requires a module-specific database."))
                               .append("\n");
                       idx += 4;
                   }
@@ -1559,11 +1625,219 @@ jobs:
                   StringBuilder sb = new StringBuilder();
                   for (String s : l) {
                       sb.append("• ").append(s).append(" — ")
-                              .append(dtcFamily(s)).append("\n");
+                              .append(dtcFamily(s)).append("\n")
+                              .append("  ↳ ").append(describeDtc(s)).append("\n");
                   }
                   return sb.toString().trim();
               }
-          
+
+              private static class TimedResponse {
+                  final String response;
+                  final long ms;
+                  TimedResponse(String response, long ms) {
+                      this.response = response;
+                      this.ms = ms;
+                  }
+              }
+
+              private TimedResponse timedElm(String command, long waitMs) throws Exception {
+                  long start = SystemClock.elapsedRealtime();
+                  String response = elm(command, waitMs);
+                  return new TimedResponse(response,
+                          SystemClock.elapsedRealtime() - start);
+              }
+
+              private void startObdClock() {
+                  obdScanStartMs = SystemClock.elapsedRealtime();
+                  obdStage = t("Pregatire...", "Preparing...");
+                  main.removeCallbacks(obdClock);
+                  main.post(obdClock);
+              }
+
+              private void stopObdClock(long ms, boolean ok) {
+                  obdScanStartMs = 0L;
+                  main.removeCallbacks(obdClock);
+                  main.post(() -> {
+                      if (obdTimer != null) {
+                          obdTimer.setText((ok
+                                  ? t("Scanare terminata in ", "Scan completed in ")
+                                  : t("Scanare oprita dupa ", "Scan stopped after "))
+                                  + formatDuration(ms));
+                      }
+                  });
+              }
+
+              private void setObdStage(String stage) {
+                  obdStage = stage == null ? "" : stage;
+              }
+
+              private void startDeepClock() {
+                  deepScanStartMs = SystemClock.elapsedRealtime();
+                  deepStage = t("Pregatire CAN...", "Preparing CAN...");
+                  main.removeCallbacks(deepClock);
+                  main.post(deepClock);
+              }
+
+              private void stopDeepClock(long ms, boolean ok) {
+                  deepScanStartMs = 0L;
+                  main.removeCallbacks(deepClock);
+                  main.post(() -> {
+                      if (deepTimer != null) {
+                          deepTimer.setText((ok
+                                  ? t("Deep Scan terminat in ", "Deep Scan completed in ")
+                                  : t("Deep Scan oprit dupa ", "Deep Scan stopped after "))
+                                  + formatDuration(ms));
+                      }
+                  });
+              }
+
+              private void setDeepStage(String stage) {
+                  deepStage = stage == null ? "" : stage;
+              }
+
+              private String formatDuration(long ms) {
+                  if (ms < 0L) ms = 0L;
+                  long min = ms / 60000L;
+                  long sec = (ms % 60000L) / 1000L;
+                  long tenth = (ms % 1000L) / 100L;
+                  if (min > 0L) {
+                      return String.format(Locale.US, "%02d:%02d.%01d",
+                              min, sec, tenth);
+                  }
+                  return String.format(Locale.US, "%d.%01d s", sec, tenth);
+              }
+
+              private TextView statusPill(String text) {
+                  TextView v = label(text, 13, GREEN, false);
+                  v.setPadding(dp(12), dp(10), dp(12), dp(10));
+                  v.setBackground(roundRect(CARD,
+                          Color.rgb(43, 48, 53), 1, 14));
+                  return v;
+              }
+
+              private String udsStatusExplanation(int s) {
+                  ArrayList<String> x = new ArrayList<>();
+                  if ((s & 0x01) != 0) x.add(t(
+                          "defect detectat acum", "fault detected now"));
+                  if ((s & 0x02) != 0) x.add(t(
+                          "a esuat in ciclul curent de contact",
+                          "failed during the current ignition cycle"));
+                  if ((s & 0x04) != 0) x.add(t(
+                          "pending: observat, dar nu complet confirmat",
+                          "pending: observed, not fully confirmed"));
+                  if ((s & 0x08) != 0) x.add(t(
+                          "confirmat si memorat in modul",
+                          "confirmed and stored in the module"));
+                  if ((s & 0x10) != 0) x.add(t(
+                          "test nefinalizat de la ultima stergere",
+                          "test not completed since last clear"));
+                  if ((s & 0x20) != 0) x.add(t(
+                          "a aparut cel putin o data de la ultima stergere",
+                          "occurred at least once since last clear"));
+                  if ((s & 0x40) != 0) x.add(t(
+                          "test nefinalizat in ciclul curent",
+                          "test not completed this cycle"));
+                  if ((s & 0x80) != 0) x.add(t(
+                          "modulul solicita un martor/avertizare",
+                          "module requests a warning indicator"));
+                  if (x.isEmpty()) return t(
+                          "niciun flag activ in status",
+                          "no active status flags");
+                  return join(x, "; ");
+              }
+
+              private String describeDtc(String code) {
+                  if (code == null) return t("Cod necunoscut.", "Unknown code.");
+                  String c = code.toUpperCase(Locale.ROOT);
+
+                  switch (c) {
+                      case "P0100": return t("Circuit debitmetru MAF - defect de circuit.", "Mass Air Flow (MAF) circuit malfunction.");
+                      case "P0101": return t("Semnal MAF in afara plajei / performanta incorecta.", "MAF range/performance problem.");
+                      case "P0102": return t("Semnal MAF prea mic.", "MAF circuit low input.");
+                      case "P0103": return t("Semnal MAF prea mare.", "MAF circuit high input.");
+                      case "P0110": return t("Circuit senzor temperatura aer admisie.", "Intake air temperature sensor circuit.");
+                      case "P0115": return t("Circuit senzor temperatura lichid racire.", "Engine coolant temperature sensor circuit.");
+                      case "P0120": return t("Circuit pozitie clapeta/acceleratie.", "Throttle/pedal position sensor circuit.");
+                      case "P0190": return t("Circuit senzor presiune rampa combustibil.", "Fuel rail pressure sensor circuit.");
+                      case "P0191": return t("Presiune rampa combustibil - plaja/performanta.", "Fuel rail pressure sensor range/performance.");
+                      case "P0201": return t("Circuit injector cilindrul 1.", "Injector circuit cylinder 1.");
+                      case "P0202": return t("Circuit injector cilindrul 2.", "Injector circuit cylinder 2.");
+                      case "P0203": return t("Circuit injector cilindrul 3.", "Injector circuit cylinder 3.");
+                      case "P0204": return t("Circuit injector cilindrul 4.", "Injector circuit cylinder 4.");
+                      case "P0234": return t("Presiune turbo prea mare / overboost.", "Turbocharger overboost condition.");
+                      case "P0299": return t("Presiune turbo prea mica / underboost.", "Turbocharger underboost condition.");
+                      case "P0300": return t("Rateuri de ardere aleatorii / multiple.", "Random/multiple cylinder misfire detected.");
+                      case "P0335": return t("Circuit senzor pozitie arbore cotit (vibrochen).", "Crankshaft position sensor circuit.");
+                      case "P0340": return t("Circuit senzor pozitie arbore cu came.", "Camshaft position sensor circuit.");
+                      case "P0380": return t("Circuit bujii incandescente / preincalzire.", "Glow plug/heater circuit malfunction.");
+                      case "P0400": return t("Debit EGR - defect general.", "Exhaust Gas Recirculation flow malfunction.");
+                      case "P0401": return t("Debit EGR insuficient.", "EGR flow insufficient detected.");
+                      case "P0402": return t("Debit EGR excesiv.", "EGR flow excessive detected.");
+                      case "P0403": return t("Circuit comanda EGR.", "EGR control circuit malfunction.");
+                      case "P0420": return t("Eficienta catalizator sub prag.", "Catalyst efficiency below threshold.");
+                      case "P0470": return t("Circuit senzor presiune gaze evacuare.", "Exhaust pressure sensor circuit.");
+                      case "P0500": return t("Semnal senzor viteza vehicul.", "Vehicle speed sensor malfunction.");
+                      case "P0560": return t("Tensiunea sistemului electric - defect.", "System voltage malfunction.");
+                      case "P0600": return t("Defect comunicatie seriala intre module.", "Serial communication link malfunction.");
+                      case "P0670": return t("Circuit modul comanda bujii incandescente.", "Glow plug control module circuit.");
+                      case "P0671": return t("Bujie incandescenta cilindrul 1 / circuit.", "Cylinder 1 glow plug circuit.");
+                      case "P0672": return t("Bujie incandescenta cilindrul 2 / circuit.", "Cylinder 2 glow plug circuit.");
+                      case "P0673": return t("Bujie incandescenta cilindrul 3 / circuit.", "Cylinder 3 glow plug circuit.");
+                      case "P0674": return t("Bujie incandescenta cilindrul 4 / circuit.", "Cylinder 4 glow plug circuit.");
+                      case "P2002": return t("Eficienta filtrului DPF sub prag.", "Diesel particulate filter efficiency below threshold.");
+                      case "P2004": return t("Clapete galerie admisie - blocat deschis.", "Intake manifold runner control stuck open.");
+                      case "P2006": return t("Clapete galerie admisie - blocat inchis.", "Intake manifold runner control stuck closed.");
+                      case "P2015": return t("Pozitie clapete galerie admisie - plaja/performanta.", "Intake manifold runner position range/performance.");
+                      case "P2263": return t("Sistem turbo/supraalimentare - performanta.", "Turbo/supercharger boost system performance.");
+                      case "P2452": return t("Circuit senzor presiune diferentiala DPF.", "DPF differential pressure sensor circuit.");
+                      case "P2453": return t("Senzor presiune DPF - plaja/performanta.", "DPF pressure sensor range/performance.");
+                      case "P2463": return t("DPF incarcat excesiv cu funingine.", "Diesel particulate filter soot accumulation.");
+                      case "P2563": return t("Senzor pozitie actuator turbo - plaja/performanta.", "Turbo boost control position sensor range/performance.");
+                      case "U0100": return t("Comunicatie pierduta cu ECU motor.", "Lost communication with ECM/PCM.");
+                      case "U0121": return t("Comunicatie pierduta cu modulul ABS/ESP.", "Lost communication with ABS/ESP control module.");
+                      case "U0140": return t("Comunicatie pierduta cu modulul de caroserie.", "Lost communication with body control module.");
+                      case "U0155": return t("Comunicatie pierduta cu instrument cluster.", "Lost communication with instrument panel cluster.");
+                  }
+
+                  if (c.startsWith("P01")) return t(
+                          "Familia masurare aer/combustibil si senzori asociati; descrierea exacta nu este in baza offline.",
+                          "Air/fuel metering or related sensor family; exact wording is not in the offline database.");
+                  if (c.startsWith("P02")) return t(
+                          "Familia injectie/combustibil; descrierea exacta nu este in baza offline.",
+                          "Fuel/injector family; exact wording is not in the offline database.");
+                  if (c.startsWith("P03")) return t(
+                          "Familia ardere, rateuri sau senzori turatie/pozitie motor.",
+                          "Ignition/misfire or engine speed/position sensor family.");
+                  if (c.startsWith("P04")) return t(
+                          "Familia emisii, EGR sau control auxiliar motor.",
+                          "Emissions/EGR or auxiliary engine-control family.");
+                  if (c.startsWith("P05")) return t(
+                          "Familia viteza vehicul, ralanti sau intrari auxiliare.",
+                          "Vehicle speed, idle control or auxiliary input family.");
+                  if (c.startsWith("P06")) return t(
+                          "Familia ECU, circuite de iesire sau procesare interna.",
+                          "ECU, output circuit or internal processing family.");
+                  if (c.startsWith("P07") || c.startsWith("P08")) return t(
+                          "Familia transmisie/cutie de viteze.",
+                          "Transmission-related fault family.");
+                  if (c.startsWith("P20") || c.startsWith("P24")) return t(
+                          "Familia diesel aftertreatment: DPF, SCR, NOx sau senzori evacuare.",
+                          "Diesel aftertreatment family: DPF, SCR, NOx or exhaust sensors.");
+                  if (c.startsWith("U")) return t(
+                          "Cod de comunicatie intre module: retea CAN, alimentare modul sau modul indisponibil.",
+                          "Inter-module communication code: CAN network, module power or unavailable module.");
+                  if (c.startsWith("C")) return t(
+                          "Cod de sasiu: poate apartine ABS/ESP, senzori roata, directie sau dinamica vehiculului.",
+                          "Chassis code: may belong to ABS/ESP, wheel-speed, steering or vehicle dynamics.");
+                  if (c.startsWith("B")) return t(
+                          "Cod de caroserie/confort: poate apartine SAM, climatizare, usi, lumini, scaune sau habitaclu.",
+                          "Body/comfort code: may belong to SAM, HVAC, doors, lighting, seats or cabin modules.");
+
+                  return t(
+                          "DTC recunoscut, dar descrierea exacta nu este in baza offline a acestei versiuni.",
+                          "Recognized DTC, but exact wording is not in this version's offline database.");
+              }
+
               private String dtcFamily(String code) {
                   if (code == null || code.length() < 1) return "";
                   switch (Character.toUpperCase(code.charAt(0))) {
@@ -1716,18 +1990,21 @@ jobs:
           
               private void appendLog(String text) {
                   main.post(() -> {
-                      if (log == null) return;
-          
-                      String old = log.getText().toString();
-                      String next = old + "\n\n" + text;
-          
-                      if (next.length() > 40000) {
-                          next = next.substring(next.length() - 40000);
+                      String old = prefs.getString("tech_log", "");
+                      String next = old.isEmpty() ? text : old + "\n\n" + text;
+
+                      if (next.length() > 80000) {
+                          next = next.substring(next.length() - 80000);
                       }
-                      log.setText(next);
+
+                      prefs.edit().putString("tech_log", next).apply();
+
+                      if (log != null) {
+                          log.setText(next);
+                      }
                   });
               }
-          
+
               private boolean requireConnection() {
                   if (isConnected()) return true;
           
@@ -1759,6 +2036,8 @@ jobs:
           
               @Override
               protected void onDestroy() {
+                  main.removeCallbacks(obdClock);
+                  main.removeCallbacks(deepClock);
                   closeSocket();
                   io.shutdownNow();
                   super.onDestroy();
@@ -1933,6 +2212,237 @@ jobs:
           }
           EOF
 
+          cat > app/src/main/java/ro/benobd/app/LogActivity.java <<'EOF'
+          package ro.benobd.app;
+          
+          import android.app.Activity;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.view.Gravity;
+          import android.view.ViewGroup;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          
+          public class LogActivity extends Activity {
+              private static final int BG = Color.rgb(8, 10, 12);
+              private static final int CARD = Color.rgb(18, 21, 24);
+              private static final int TEXT = Color.rgb(239, 243, 245);
+              private static final int MUTED = Color.rgb(150, 160, 166);
+              private static final int GREEN = Color.rgb(91, 219, 146);
+          
+              private SharedPreferences prefs;
+              private TextView logView;
+              private TextView sizeInfo;
+              private boolean english;
+              private final Handler handler = new Handler(Looper.getMainLooper());
+          
+              private final Runnable refreshLoop = new Runnable() {
+                  @Override public void run() {
+                      refreshLog();
+                      handler.postDelayed(this, 750);
+                  }
+              };
+          
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  prefs = getSharedPreferences("benobd", MODE_PRIVATE);
+                  english = prefs.getBoolean("english", false);
+                  drawUi();
+              }
+          
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  handler.removeCallbacks(refreshLoop);
+                  handler.post(refreshLoop);
+              }
+          
+              @Override
+              protected void onPause() {
+                  handler.removeCallbacks(refreshLoop);
+                  super.onPause();
+              }
+          
+              private void drawUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setFillViewport(true);
+                  scroll.setBackgroundColor(BG);
+          
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(dp(16), dp(16), dp(16), dp(40));
+                  scroll.addView(root, new ScrollView.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT));
+          
+                  TextView title = label(
+                          t("Jurnal Tehnic", "Technical Log"), 26, TEXT, true);
+                  root.addView(title);
+          
+                  TextView subtitle = label(t(
+                          "Comenzi OBD/UDS, raspunsuri ECU, timpi de procesare si erori de comunicatie.",
+                          "OBD/UDS commands, ECU responses, processing times and communication errors."),
+                          12, MUTED, false);
+                  subtitle.setPadding(0, dp(4), 0, dp(8));
+                  root.addView(subtitle);
+          
+                  sizeInfo = label("", 11, GREEN, false);
+                  sizeInfo.setPadding(0, 0, 0, dp(8));
+                  root.addView(sizeInfo);
+          
+                  Button back = button(t("Inapoi la diagnoza", "Back to diagnostics"));
+                  back.setOnClickListener(v -> finish());
+                  root.addView(back, gap());
+          
+                  Button refresh = secondaryButton(
+                          t("Reincarca jurnalul", "Refresh log"));
+                  refresh.setOnClickListener(v -> refreshLog());
+                  root.addView(refresh, gap());
+          
+                  logView = label("", 12, Color.rgb(201, 209, 213), false);
+                  logView.setTypeface(Typeface.MONOSPACE);
+                  logView.setTextIsSelectable(true);
+                  logView.setPadding(dp(12), dp(12), dp(12), dp(12));
+                  logView.setBackground(roundRect(
+                          CARD, Color.rgb(43, 48, 53), 1, 14));
+                  root.addView(logView, gap());
+          
+                  Button copy = secondaryButton(
+                          t("Copiaza jurnalul complet", "Copy full log"));
+                  copy.setOnClickListener(v -> {
+                      ClipboardManager cm =
+                              (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                      cm.setPrimaryClip(ClipData.newPlainText(
+                              "BenOBD technical log", logView.getText()));
+                      Toast.makeText(this,
+                              t("Jurnal copiat.", "Log copied."),
+                              Toast.LENGTH_SHORT).show();
+                  });
+                  root.addView(copy, gap());
+          
+                  Button clear = dangerButton(
+                          t("Goleste jurnalul", "Clear log"));
+                  clear.setOnClickListener(v -> {
+                      prefs.edit().putString("tech_log", "").apply();
+                      refreshLog();
+                      Toast.makeText(this,
+                              t("Jurnal golit.", "Log cleared."),
+                              Toast.LENGTH_SHORT).show();
+                  });
+                  root.addView(clear, gap());
+          
+                  setContentView(scroll);
+                  refreshLog();
+              }
+          
+              private void refreshLog() {
+                  if (logView == null) return;
+                  String value = prefs.getString("tech_log", "");
+                  if (value.trim().isEmpty()) {
+                      logView.setText(t("Jurnalul este gol.", "The log is empty."));
+                      if (sizeInfo != null) {
+                          sizeInfo.setText(t("0 caractere", "0 characters"));
+                      }
+                      return;
+                  }
+          
+                  logView.setText(value);
+                  if (sizeInfo != null) {
+                      sizeInfo.setText(t("Marime jurnal: ", "Log size: ")
+                              + value.length() + t(" caractere", " characters"));
+                  }
+              }
+          
+              private String t(String ro, String en) {
+                  return english ? en : ro;
+              }
+          
+              private TextView label(String text, int size, int color, boolean bold) {
+                  TextView v = new TextView(this);
+                  v.setText(text);
+                  v.setTextSize(size);
+                  v.setTextColor(color);
+                  v.setTypeface(Typeface.create(
+                          "sans-serif-light",
+                          bold ? Typeface.BOLD : Typeface.NORMAL));
+                  v.setGravity(Gravity.CENTER_VERTICAL);
+                  return v;
+              }
+          
+              private Button button(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextColor(Color.rgb(15, 17, 19));
+                  b.setTextSize(15);
+                  b.setAllCaps(false);
+                  b.setTypeface(Typeface.create(
+                          "sans-serif-light", Typeface.BOLD));
+                  b.setBackground(roundRect(
+                          Color.rgb(218, 226, 231),
+                          Color.rgb(218, 226, 231), 0, 13));
+                  return b;
+              }
+          
+              private Button secondaryButton(String text) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setTextColor(TEXT);
+                  b.setTextSize(14);
+                  b.setAllCaps(false);
+                  b.setTypeface(Typeface.create(
+                          "sans-serif-light", Typeface.NORMAL));
+                  b.setBackground(roundRect(
+                          Color.rgb(26, 30, 34),
+                          Color.rgb(66, 73, 78), 1, 13));
+                  return b;
+              }
+          
+              private Button dangerButton(String text) {
+                  Button b = secondaryButton(text);
+                  b.setTextColor(Color.rgb(255, 205, 205));
+                  b.setBackground(roundRect(
+                          Color.rgb(45, 20, 22),
+                          Color.rgb(116, 55, 58), 1, 13));
+                  return b;
+              }
+          
+              private GradientDrawable roundRect(
+                      int fill, int stroke, int width, int radius) {
+                  GradientDrawable d = new GradientDrawable();
+                  d.setColor(fill);
+                  d.setCornerRadius(dp(radius));
+                  if (width > 0) d.setStroke(dp(width), stroke);
+                  return d;
+              }
+          
+              private LinearLayout.LayoutParams gap() {
+                  LinearLayout.LayoutParams p =
+                          new LinearLayout.LayoutParams(
+                                  ViewGroup.LayoutParams.MATCH_PARENT,
+                                  ViewGroup.LayoutParams.WRAP_CONTENT);
+                  p.topMargin = dp(8);
+                  return p;
+              }
+          
+              private int dp(int value) {
+                  return Math.round(value
+                          * getResources().getDisplayMetrics().density);
+              }
+          }
+          EOF
+
       - name: Build debug APK
         run: gradle --no-daemon :app:assembleDebug
 
@@ -1943,11 +2453,11 @@ jobs:
           ls -lh app/build/outputs/apk/debug/app-debug.apk
 
       - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v4.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk BenOBD-v5.1.apk
 
-      - name: Upload BenOBD v4 APK
+      - name: Upload BenOBD v5.1 APK
         uses: actions/upload-artifact@v4
         with:
-          name: BenOBD-v4-APK
-          path: BenOBD-v4.apk
+          name: BenOBD-v5.1-APK
+          path: BenOBD-v5.1.apk
           retention-days: 30
